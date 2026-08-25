@@ -31,5 +31,8 @@ bitflags! {
         const TOMBSTONE = 1 << 3;
         const SPARSE = 1 << 4;
         const COMPRESSED = 1 << 5;
+        const READONLY = 1 << 6;
+        const HIDDEN = 1 << 7;
+        const SYSTEM = 1 << 8;
     }
 }

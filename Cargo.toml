@@ -21,6 +21,7 @@ notify = "8.2"
 parking_lot = "0.12"
 proptest = "1.8"
 rayon = "1.11"
+rfd = "0.17.2"
 serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
 smallvec = { version = "1.15", features = ["serde"] }
@@ -39,4 +40,3 @@ strip = "symbols"
 
 [profile.dev]
 debug = 1
-

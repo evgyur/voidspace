@@ -1,0 +1,17 @@
+[package]
+name = "voidspace-watch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+crossbeam-channel.workspace = true
+notify.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
