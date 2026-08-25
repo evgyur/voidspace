@@ -19,6 +19,9 @@ use voidspace_watch::{WatchHandle, WatchRequest, WatchSignal, watch};
 
 use crate::{settings::Settings, theme, treemap};
 
+const MAX_SCAN_EVENTS_PER_FRAME: usize = 2_048;
+const MAX_SCAN_WORK_PER_FRAME: Duration = Duration::from_millis(5);
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkspaceMode {
     Docked,
@@ -54,12 +57,16 @@ struct ScanTab {
     last_watch_event: Option<Instant>,
     errors: Vec<String>,
     show_other_for: Option<(NodeId, u32)>,
+    preview: treemap::PreviewState,
 }
 
 enum InspectorAction {
     Reveal(PathBuf),
     Recycle(PathBuf),
     Permanent(PathBuf),
+    Rescan,
+    Snapshot,
+    Report(ReportFormat),
 }
 
 enum ArtifactAction {
@@ -190,6 +197,7 @@ impl VoidspaceApp {
             last_watch_event: None,
             errors: Vec::new(),
             show_other_for: None,
+            preview: treemap::PreviewState::default(),
         });
         self.active_tab = self.tabs.len() - 1;
     }
@@ -225,7 +233,11 @@ impl VoidspaceApp {
                 }
             }
             let mut dirty = DirtySet::default();
-            for _ in 0..20_000 {
+            let batch_started = Instant::now();
+            for processed in 0..MAX_SCAN_EVENTS_PER_FRAME {
+                if scan_batch_exhausted(processed, batch_started.elapsed()) {
+                    break;
+                }
                 let Ok(event) = tab.events.try_recv() else {
                     break;
                 };
@@ -281,6 +293,7 @@ impl VoidspaceApp {
         tab.view_root = tab.snapshot.root;
         tab.selected = None;
         tab.show_other_for = None;
+        tab.preview.clear();
         let (event_tx, event_rx) = bounded(65_536);
         tab.events = event_rx;
         match start(
@@ -303,62 +316,52 @@ impl VoidspaceApp {
     }
 
     fn top_bar(&mut self, root_ui: &mut egui::Ui) {
+        let mut normal_scan = false;
         egui::Panel::top("topbar")
             .exact_size(56.0)
-            .frame(egui::Frame::new().fill(theme::SURFACE).inner_margin(10.0))
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::SURFACE)
+                    .inner_margin(egui::Margin::symmetric(12, 8))
+                    .stroke(egui::Stroke::new(1.0, theme::LINE)),
+            )
             .show(root_ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new("VOIDSPACE")
-                            .strong()
-                            .color(theme::ORANGE)
-                            .size(12.0),
-                    );
-                    ui.add_space(8.0);
-                    let scope_width = (ui.available_width() * 0.33).clamp(180.0, 520.0);
                     ui.add_sized(
+                        [68.0, 36.0],
+                        egui::Label::new(
+                            egui::RichText::new("VOIDSPACE")
+                                .strong()
+                                .color(theme::ORANGE)
+                                .size(11.0),
+                        ),
+                    );
+                    let compact = ui.available_width() < 820.0;
+                    let privilege_width = if compact { 0.0 } else { 66.0 };
+                    let fixed = 112.0 + privilege_width + if compact { 20.0 } else { 30.0 };
+                    let fields = (ui.available_width() - fixed).max(280.0);
+                    let filter_width = if compact {
+                        (fields * 0.42).clamp(150.0, 220.0)
+                    } else {
+                        (fields * 0.40).clamp(180.0, 340.0)
+                    };
+                    let scope_width = (fields - filter_width - 10.0).max(130.0);
+                    let scope = ui.add_sized(
                         [scope_width, 36.0],
                         egui::TextEdit::singleline(&mut self.scope_text)
-                            .hint_text("C:\\ or folder path"),
+                            .hint_text("C:\\ · press Enter to scan")
+                            .margin(egui::Margin::symmetric(11, 8)),
                     );
-                    if ui.button("BROWSE").clicked()
-                        && let Some(folder) = rfd::FileDialog::new().pick_folder()
-                    {
-                        self.scope_text = folder.display().to_string();
+                    if scope.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
+                        normal_scan = true;
                     }
-                    if ui
-                        .add_sized(
-                            [96.0, 36.0],
-                            egui::Button::new(
-                                egui::RichText::new("SCAN").strong().color(theme::BG),
-                            )
-                            .fill(theme::ORANGE),
-                        )
-                        .clicked()
-                    {
-                        self.start_scan(PathBuf::from(self.scope_text.trim()));
-                    }
-                    if ui
-                        .add_sized(
-                            [112.0, 36.0],
-                            egui::Button::new(
-                                egui::RichText::new("TURBO / F5").strong().color(theme::BG),
-                            )
-                            .fill(theme::LIME),
-                        )
-                        .clicked()
-                    {
-                        self.launch_turbo();
-                    }
-                    ui.separator();
-                    let filter_response = (ui.available_width() >= 140.0).then(|| {
-                        ui.add_sized(
-                            [ui.available_width(), 36.0],
-                            egui::TextEdit::singleline(&mut self.filter_text)
-                                .hint_text("Filter · size > 1GiB AND NOT attr:system"),
-                        )
-                    });
-                    if filter_response.is_some_and(|response| response.changed()) {
+                    let filter_response = ui.add_sized(
+                        [filter_width, 36.0],
+                        egui::TextEdit::singleline(&mut self.filter_text)
+                            .hint_text("size > 1GiB AND NOT attr:system")
+                            .margin(egui::Margin::symmetric(11, 8)),
+                    );
+                    if filter_response.changed() {
                         if self.filter_text.trim().is_empty() {
                             self.filter = None;
                             self.filter_error = None;
@@ -372,90 +375,30 @@ impl VoidspaceApp {
                             }
                         }
                     }
-                });
-            });
-    }
-
-    fn scan_toolbar(&mut self, root_ui: &mut egui::Ui) {
-        if self.tabs.is_empty() {
-            return;
-        }
-        let mut rescan = false;
-        let mut artifact_action = None;
-        egui::Panel::top("scan-toolbar")
-            .exact_size(42.0)
-            .frame(
-                egui::Frame::new()
-                    .fill(theme::SURFACE)
-                    .inner_margin(egui::Margin::symmetric(10, 4)),
-            )
-            .show(root_ui, |ui| {
-                let tab = &mut self.tabs[self.active_tab];
-                ui.horizontal(|ui| {
-                    let pause_label = if tab.paused { "RESUME" } else { "PAUSE" };
                     if ui
-                        .add_enabled(tab.scanning, egui::Button::new(pause_label))
+                        .add_sized(
+                            [112.0, 36.0],
+                            egui::Button::new(
+                                egui::RichText::new("TURBO / F5").strong().color(theme::BG),
+                            )
+                            .fill(theme::ORANGE),
+                        )
                         .clicked()
-                        && let Some(scan) = &tab.scan
                     {
-                        if tab.paused {
-                            scan.resume();
-                        } else {
-                            scan.pause();
-                        }
-                        tab.paused = !tab.paused;
+                        self.launch_turbo();
                     }
-                    if ui.button("RESCAN").clicked() {
-                        rescan = true;
+                    if !compact {
+                        egui::Frame::new()
+                            .stroke(egui::Stroke::new(1.0, theme::ORANGE))
+                            .inner_margin(egui::Margin::symmetric(9, 7))
+                            .show(ui, |ui| {
+                                ui.monospace(if self.turbo_session { "ADMIN" } else { "USER" });
+                            });
                     }
-                    if ui.button("SNAPSHOT").clicked() {
-                        artifact_action = Some(ArtifactAction::Snapshot);
-                    }
-                    ui.menu_button("EXPORT", |ui| {
-                        for (label, format) in [
-                            ("CSV", ReportFormat::Csv),
-                            ("JSON", ReportFormat::Json),
-                            ("HTML", ReportFormat::Html),
-                            ("TEXT", ReportFormat::Text),
-                        ] {
-                            if ui.button(label).clicked() {
-                                artifact_action = Some(ArtifactAction::Report(format));
-                                ui.close();
-                            }
-                        }
-                    });
-                    ui.separator();
-                    ui.label(
-                        egui::RichText::new(if tab.paused {
-                            "PAUSED"
-                        } else if tab.scanning {
-                            "INDEXING"
-                        } else {
-                            "WATCHING"
-                        })
-                        .monospace()
-                        .strong()
-                        .color(if tab.paused {
-                            theme::MAGENTA
-                        } else if tab.scanning {
-                            theme::ORANGE
-                        } else {
-                            theme::LIME
-                        }),
-                    );
-                    ui.separator();
-                    ui.label(
-                        egui::RichText::new(tab.root_path.display().to_string())
-                            .small()
-                            .color(theme::MUTED),
-                    );
                 });
             });
-        if rescan {
-            self.restart_tab(self.active_tab);
-        }
-        if let Some(action) = artifact_action {
-            self.save_artifact(action);
+        if normal_scan {
+            self.start_scan(PathBuf::from(self.scope_text.trim()));
         }
     }
 
@@ -499,15 +442,34 @@ impl VoidspaceApp {
             .show(root_ui, |ui| {
                 ui.horizontal(|ui| {
                     for (index, tab) in self.tabs.iter().enumerate() {
+                        let active = index == self.active_tab;
                         let label = if tab.scanning {
                             format!("{} · SCANNING", tab.title)
                         } else {
                             format!("{} · LIVE", tab.title)
                         };
-                        if ui
-                            .selectable_label(index == self.active_tab, label)
-                            .clicked()
-                        {
+                        let width = (label.chars().count() as f32 * 7.4 + 30.0).clamp(92.0, 260.0);
+                        let response = ui.add_sized(
+                            [width, 31.0],
+                            egui::Button::new(egui::RichText::new(label).color(if active {
+                                theme::TEXT
+                            } else {
+                                theme::MUTED
+                            }))
+                            .fill(if active {
+                                theme::RAISED
+                            } else {
+                                theme::SURFACE
+                            })
+                            .stroke(egui::Stroke::NONE),
+                        );
+                        if active {
+                            ui.painter().line_segment(
+                                [response.rect.left_bottom(), response.rect.right_bottom()],
+                                egui::Stroke::new(2.0, theme::ORANGE),
+                            );
+                        }
+                        if response.clicked() {
                             self.active_tab = index;
                         }
                     }
@@ -518,7 +480,7 @@ impl VoidspaceApp {
     fn inspector(ui: &mut egui::Ui, tab: &mut ScanTab) -> Option<InspectorAction> {
         let mut action = None;
         ui.label(
-            egui::RichText::new("OBJECT / INSPECTOR")
+            egui::RichText::new("OBJECT / 01")
                 .monospace()
                 .size(10.0)
                 .color(theme::MUTED),
@@ -527,56 +489,139 @@ impl VoidspaceApp {
         let selected = tab.selected.unwrap_or(tab.view_root);
         if let Some(node) = tab.snapshot.node(selected) {
             ui.heading(node.name.display_escaped());
-            ui.label(egui::RichText::new(tab.root_path.display().to_string()).color(theme::MUTED));
-            ui.add_space(14.0);
-            egui::Grid::new("metrics")
-                .num_columns(2)
-                .striped(true)
-                .show(ui, |ui| {
-                    ui.label("Allocated");
-                    ui.monospace(treemap::format_bytes(node.allocated));
-                    ui.end_row();
-                    ui.label("Logical");
-                    ui.monospace(treemap::format_bytes(node.logical));
-                    ui.end_row();
-                    ui.label("Children");
-                    ui.monospace(node.children.len().to_string());
-                    ui.end_row();
+            let selected_path = path_for_node(tab, selected);
+            ui.label(
+                egui::RichText::new(selected_path.display().to_string())
+                    .size(12.0)
+                    .color(theme::MUTED),
+            );
+            ui.add_space(18.0);
+            for (label, value) in [
+                ("Allocated", treemap::format_bytes(node.allocated)),
+                ("Logical", treemap::format_bytes(node.logical)),
+                ("Children", node.children.len().to_string()),
+            ] {
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label(label);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.monospace(value);
+                    });
                 });
+                ui.add_space(4.0);
+            }
+            ui.add_space(14.0);
+            ui.label(
+                egui::RichText::new("NAVIGATION")
+                    .monospace()
+                    .size(10.0)
+                    .color(theme::MUTED),
+            );
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(!node.children.is_empty(), egui::Button::new("ZOOM INTO"))
+                    .clicked()
+                {
+                    tab.history.push(tab.view_root);
+                    tab.view_root = selected;
+                    tab.preview.clear();
+                }
+                if ui
+                    .add_enabled(!tab.history.is_empty(), egui::Button::new("BACK"))
+                    .clicked()
+                    && let Some(previous) = tab.history.pop()
+                {
+                    tab.view_root = previous;
+                    tab.preview.clear();
+                }
+            });
             ui.add_space(16.0);
-            if ui.button("ZOOM INTO").clicked() && !node.children.is_empty() {
-                tab.history.push(tab.view_root);
-                tab.view_root = selected;
-            }
-            if ui.button("BACK").clicked()
-                && let Some(previous) = tab.history.pop()
-            {
-                tab.view_root = previous;
-            }
-            ui.add_space(10.0);
+            ui.separator();
+            ui.label(
+                egui::RichText::new("SCAN CONTROLS")
+                    .monospace()
+                    .size(10.0)
+                    .color(theme::MUTED),
+            );
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                let pause_label = if tab.paused { "RESUME" } else { "PAUSE" };
+                if ui
+                    .add_enabled(tab.scanning, egui::Button::new(pause_label))
+                    .clicked()
+                    && let Some(scan) = &tab.scan
+                {
+                    if tab.paused {
+                        scan.resume();
+                    } else {
+                        scan.pause();
+                    }
+                    tab.paused = !tab.paused;
+                }
+                if ui.button("RESCAN").clicked() {
+                    action = Some(InspectorAction::Rescan);
+                }
+            });
+            ui.horizontal(|ui| {
+                if ui.button("SNAPSHOT").clicked() {
+                    action = Some(InspectorAction::Snapshot);
+                }
+                ui.menu_button("EXPORT", |ui| {
+                    for (label, format) in [
+                        ("CSV", ReportFormat::Csv),
+                        ("JSON", ReportFormat::Json),
+                        ("HTML", ReportFormat::Html),
+                        ("TEXT", ReportFormat::Text),
+                    ] {
+                        if ui.button(label).clicked() {
+                            action = Some(InspectorAction::Report(format));
+                            ui.close();
+                        }
+                    }
+                });
+            });
+            ui.add_space(16.0);
             ui.separator();
             ui.label(
                 egui::RichText::new("FILE ACTIONS")
                     .monospace()
-                    .small()
+                    .size(10.0)
                     .color(theme::MUTED),
             );
-            let selected_path = path_for_node(tab, selected);
-            ui.horizontal_wrapped(|ui| {
-                if ui.button("SHOW IN EXPLORER").clicked() {
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui.button("EXPLORER").clicked() {
                     action = Some(InspectorAction::Reveal(selected_path.clone()));
                 }
-                if selected != tab.snapshot.root && ui.button("RECYCLE").clicked() {
-                    action = Some(InspectorAction::Recycle(selected_path.clone()));
-                }
-                if selected != tab.snapshot.root
-                    && ui
-                        .add(egui::Button::new("DELETE FOREVER").fill(theme::ORANGE))
-                        .clicked()
-                {
-                    action = Some(InspectorAction::Permanent(selected_path));
+                if ui.button("COPY PATH").clicked() {
+                    ui.ctx().copy_text(selected_path.display().to_string());
                 }
             });
+            if selected != tab.snapshot.root {
+                ui.horizontal(|ui| {
+                    if ui.button("RECYCLE").clicked() {
+                        action = Some(InspectorAction::Recycle(selected_path.clone()));
+                    }
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new("DELETE FOREVER").color(theme::ORANGE),
+                            )
+                            .stroke(egui::Stroke::new(1.0, theme::ORANGE)),
+                        )
+                        .clicked()
+                    {
+                        action = Some(InspectorAction::Permanent(selected_path));
+                    }
+                });
+            }
+            ui.add_space(10.0);
+            ui.label(
+                egui::RichText::new("Hover a tile to reveal children · click to pin")
+                    .size(11.0)
+                    .color(theme::MUTED),
+            );
             ui.add_space(10.0);
             if let Some((other_parent, other_count)) = tab.show_other_for
                 && other_parent == selected
@@ -585,7 +630,7 @@ impl VoidspaceApp {
                 ui.label(
                     egui::RichText::new("OTHER · SMALL ITEMS")
                         .strong()
-                        .color(theme::MAGENTA),
+                        .color(theme::ORANGE),
                 );
                 let mut children: Vec<_> = node
                     .children
@@ -651,13 +696,20 @@ impl VoidspaceApp {
         if mode == WorkspaceMode::Docked {
             egui::Panel::right("inspector")
                 .exact_size(320.0)
-                .frame(egui::Frame::new().fill(theme::SURFACE).inner_margin(16.0))
+                .frame(
+                    egui::Frame::new()
+                        .fill(theme::SURFACE)
+                        .inner_margin(16.0)
+                        .stroke(egui::Stroke::new(1.0, theme::LINE)),
+                )
                 .show(root_ui, |ui| {
-                    inspector_action = Self::inspector(ui, tab);
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        inspector_action = Self::inspector(ui, tab);
+                    });
                 });
         }
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(theme::BG).inner_margin(8.0))
+            .frame(egui::Frame::new().fill(theme::MAP_BG).inner_margin(8.0))
             .show(root_ui, |ui| {
                 if mode == WorkspaceMode::DrawerClosed && ui.button("DETAILS").clicked() {
                     self.details_drawer = true;
@@ -674,9 +726,9 @@ impl VoidspaceApp {
                             available.bottom(),
                         ),
                         size_mode: SizeMode::Allocated,
-                        max_depth: 5,
-                        min_area: 12.0,
-                        max_rectangles: 50_000,
+                        max_depth: 1,
+                        min_area: 196.0,
+                        max_rectangles: 1024,
                     },
                     &DirtySet::default(),
                 );
@@ -686,7 +738,11 @@ impl VoidspaceApp {
                     &tab.layout,
                     tab.selected,
                     self.filter.as_ref(),
+                    tab.preview,
                 );
+                if response.canvas_clicked {
+                    tab.preview.apply_canvas_click(response.pin_clicked);
+                }
                 if let Some(selected) = response.clicked {
                     tab.selected = Some(selected);
                     tab.show_other_for = response.aggregate_clicked;
@@ -700,6 +756,7 @@ impl VoidspaceApp {
                     tab.history.push(tab.view_root);
                     tab.view_root = selected;
                     tab.selected = Some(selected);
+                    tab.preview.clear();
                 }
             });
 
@@ -731,6 +788,11 @@ impl VoidspaceApp {
             InspectorAction::Recycle(path) => self.prepare_fileop(path, OperationKind::Recycle),
             InspectorAction::Permanent(path) => {
                 self.prepare_fileop(path, OperationKind::Permanent);
+            }
+            InspectorAction::Rescan => self.restart_tab(self.active_tab),
+            InspectorAction::Snapshot => self.save_artifact(ArtifactAction::Snapshot),
+            InspectorAction::Report(format) => {
+                self.save_artifact(ArtifactAction::Report(format));
             }
         }
     }
@@ -910,6 +972,10 @@ impl VoidspaceApp {
     }
 }
 
+fn scan_batch_exhausted(processed: usize, elapsed: Duration) -> bool {
+    processed > 0 && elapsed >= MAX_SCAN_WORK_PER_FRAME
+}
+
 impl eframe::App for VoidspaceApp {
     fn logic(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
         if context.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::F5)) {
@@ -921,7 +987,6 @@ impl eframe::App for VoidspaceApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.top_bar(ui);
         self.tab_bar(ui);
-        self.scan_toolbar(ui);
         self.status_bar(ui);
         self.workspace(ui);
         self.fileop_dialog(ui.ctx());
@@ -955,5 +1020,25 @@ fn empty_layout(root: NodeId) -> LayoutSnapshot {
         index_version: 0,
         root,
         nodes: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod worker_budget_tests {
+    use super::{MAX_SCAN_WORK_PER_FRAME, scan_batch_exhausted};
+    use std::time::Duration;
+
+    #[test]
+    fn scan_batch_always_accepts_the_first_event() {
+        assert!(!scan_batch_exhausted(0, Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn scan_batch_yields_after_its_ui_time_budget() {
+        assert!(scan_batch_exhausted(1, MAX_SCAN_WORK_PER_FRAME));
+        assert!(!scan_batch_exhausted(
+            1,
+            MAX_SCAN_WORK_PER_FRAME - Duration::from_nanos(1)
+        ));
     }
 }

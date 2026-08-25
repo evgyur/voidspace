@@ -38,3 +38,16 @@ fn layout_is_deterministic() {
         layout_weights(&weights, bounds)
     );
 }
+
+#[test]
+fn wide_canvas_places_the_dominant_tile_on_the_left() {
+    let bounds = Rect::new(0.0, 0.0, 1000.0, 500.0);
+    let out = layout_weights(&[55, 20, 15, 10], bounds);
+    let dominant = out[0];
+
+    assert_eq!(dominant.min_x, bounds.min_x);
+    assert_eq!(dominant.min_y, bounds.min_y);
+    assert_eq!(dominant.max_y, bounds.max_y);
+    assert!(dominant.width() > 400.0);
+    assert!(dominant.width() < 700.0);
+}

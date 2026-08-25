@@ -7,3 +7,4 @@ mod theme;
 mod treemap;
 
 pub use app::{VoidspaceApp, WorkspaceMode, workspace_mode};
+pub use treemap::PreviewState;
