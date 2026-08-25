@@ -2,5 +2,6 @@
 target/
 .shaw/
 STATE.lock
+STATE.yaml.lock
 *.pdb
 *.dmp
