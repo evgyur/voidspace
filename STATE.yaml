@@ -1,7 +1,7 @@
 {
   "version": 5,
   "project": "Voidspace",
-  "updated_at": "2026-08-25T08:41:27Z",
+  "updated_at": "2026-08-25T19:14:01Z",
   "owner": "Codex",
   "portfolio": {
     "project_priority": "normal",
@@ -259,112 +259,7 @@
     ]
   },
   "lanes": {
-    "todo": [
-      {
-        "id": "live-ui",
-        "title": "Spectral UI, normal scanner, filters, and live watcher",
-        "priority": "critical",
-        "owner": "Codex",
-        "status": "todo",
-        "source": "project-storm",
-        "task_type": "workstream",
-        "parent_id": null,
-        "component": "app",
-        "executor": "shaw",
-        "context": "",
-        "acceptance": "Desktop app scans a selected scope, streams treemap results, filters and reconciles live mutations",
-        "verify": "cargo test -p voidspace-scan -p voidspace-filter -p voidspace-watch -p voidspace-app",
-        "dependencies": [],
-        "risk": "",
-        "constraints": [],
-        "affected_modules": [
-          "app"
-        ],
-        "do_not": [],
-        "return": [],
-        "notes": [],
-        "next_action": "",
-        "updated_at": "2026-08-25T08:32:46Z"
-      },
-      {
-        "id": "elevated-fileops",
-        "title": "Elevated helper, Turbo scan, and safe file actions",
-        "priority": "critical",
-        "owner": "Codex",
-        "status": "todo",
-        "source": "project-storm",
-        "task_type": "workstream",
-        "parent_id": null,
-        "component": "windows",
-        "executor": "shaw",
-        "context": "",
-        "acceptance": "Typed helper builds; UAC/Turbo path works; recycle and guarded permanent delete pass temp-volume tests",
-        "verify": "cargo test -p voidspace-elevated -p voidspace-fileops",
-        "dependencies": [],
-        "risk": "",
-        "constraints": [],
-        "affected_modules": [
-          "windows"
-        ],
-        "do_not": [],
-        "return": [],
-        "notes": [],
-        "next_action": "",
-        "updated_at": "2026-08-25T08:32:47Z"
-      },
-      {
-        "id": "artifacts",
-        "title": "Snapshots, exports, settings, and diagnostics",
-        "priority": "high",
-        "owner": "Codex",
-        "status": "todo",
-        "source": "project-storm",
-        "task_type": "workstream",
-        "parent_id": null,
-        "component": "artifacts",
-        "executor": "shaw",
-        "context": "",
-        "acceptance": "Snapshot round-trip and hostile-input tests pass; four exports and atomic settings work",
-        "verify": "cargo test -p voidspace-export -p voidspace-app",
-        "dependencies": [],
-        "risk": "",
-        "constraints": [],
-        "affected_modules": [
-          "artifacts"
-        ],
-        "do_not": [],
-        "return": [],
-        "notes": [],
-        "next_action": "",
-        "updated_at": "2026-08-25T08:32:47Z"
-      },
-      {
-        "id": "release",
-        "title": "Integration, hardening, and portable Windows release",
-        "priority": "critical",
-        "owner": "Codex",
-        "status": "todo",
-        "source": "project-storm",
-        "task_type": "workstream",
-        "parent_id": null,
-        "component": "release",
-        "executor": "shaw",
-        "context": "",
-        "acceptance": "Fmt, clippy, workspace tests, release build, smoke script, and portable zip all pass",
-        "verify": "powershell -ExecutionPolicy Bypass -File scripts/package.ps1",
-        "dependencies": [],
-        "risk": "",
-        "constraints": [],
-        "affected_modules": [
-          "release"
-        ],
-        "do_not": [],
-        "return": [],
-        "notes": [],
-        "next_action": "",
-        "updated_at": "2026-08-25T08:32:47Z"
-      }
-    ],
+    "todo": [],
     "in_progress": [],
     "blocked": [],
     "done": [
@@ -404,6 +299,158 @@
         "verify_evidence": "command_run:C:\\Users\\user\\.github\\voidspace\\.worktrees\\voidspace-v1\\.project-flow\\evidence\\foundation.command_run.json",
         "evidence_artifacts": [
           "C:\\Users\\user\\.github\\voidspace\\.worktrees\\voidspace-v1\\.project-flow\\evidence\\20260825T084127_foundation_1.json"
+        ]
+      },
+      {
+        "id": "live-ui",
+        "title": "Spectral UI, normal scanner, filters, and live watcher",
+        "priority": "critical",
+        "owner": "Codex",
+        "status": "done",
+        "source": "project-storm",
+        "task_type": "workstream",
+        "parent_id": null,
+        "component": "app",
+        "executor": "shaw",
+        "context": "",
+        "acceptance": "Desktop app scans a selected scope, streams treemap results, filters and reconciles live mutations",
+        "verify": "cargo test -p voidspace-scan -p voidspace-filter -p voidspace-watch -p voidspace-app",
+        "dependencies": [],
+        "risk": "",
+        "constraints": [],
+        "affected_modules": [
+          "app"
+        ],
+        "do_not": [],
+        "return": [],
+        "notes": [
+          "[2026-08-25T08:41:35Z] shaw start by Codex",
+          "[2026-08-25T18:43:13Z] outcome: Streaming Spectral UI scans selected scopes, filters nodes, watches live mutations, supports pause/rescan, and groups tiny tiles into a right-hand Other column",
+          "[2026-08-25T18:43:14Z] verify evidence: command_run:C:\\Users\\user\\.github\\voidspace\\.worktrees\\voidspace-v1\\.project-flow\\evidence\\live-ui.command_run.json"
+        ],
+        "next_action": "",
+        "updated_at": "2026-08-25T18:43:14Z",
+        "outcome": "Streaming Spectral UI scans selected scopes, filters nodes, watches live mutations, supports pause/rescan, and groups tiny tiles into a right-hand Other column",
+        "evidence": [
+          "command_run:C:\\Users\\user\\.github\\voidspace\\.worktrees\\voidspace-v1\\.project-flow\\evidence\\live-ui.command_run.json"
+        ],
+        "verify_evidence": "command_run:C:\\Users\\user\\.github\\voidspace\\.worktrees\\voidspace-v1\\.project-flow\\evidence\\live-ui.command_run.json",
+        "evidence_artifacts": [
+          "C:\\Users\\user\\.github\\voidspace\\.worktrees\\voidspace-v1\\.project-flow\\evidence\\20260825T184314_live-ui_1.json"
+        ]
+      },
+      {
+        "id": "elevated-fileops",
+        "title": "Elevated helper, Turbo scan, and safe file actions",
+        "priority": "critical",
+        "owner": "shaw",
+        "status": "done",
+        "source": "project-storm",
+        "task_type": "workstream",
+        "parent_id": null,
+        "component": "windows",
+        "executor": "shaw",
+        "context": "",
+        "acceptance": "Typed helper builds; UAC/Turbo path works; recycle and guarded permanent delete pass temp-volume tests",
+        "verify": "cargo test -p voidspace-elevated -p voidspace-fileops",
+        "dependencies": [],
+        "risk": "",
+        "constraints": [],
+        "affected_modules": [
+          "windows"
+        ],
+        "do_not": [],
+        "return": [],
+        "notes": [
+          "[2026-08-25T18:43:23Z] shaw start by shaw",
+          "[2026-08-25T18:55:56Z] outcome: Guarded Recycle Bin and DELETE-confirmed permanent deletion are integrated; UAC relaunch and typed elevated helper ship with an explicit privileged traversal fallback",
+          "[2026-08-25T18:55:56Z] verify evidence: command_run:C:\\Users\\user\\.github\\voidspace\\.worktrees\\voidspace-v1\\.project-flow\\evidence\\elevated-fileops.command_run.json"
+        ],
+        "next_action": "",
+        "updated_at": "2026-08-25T18:55:56Z",
+        "outcome": "Guarded Recycle Bin and DELETE-confirmed permanent deletion are integrated; UAC relaunch and typed elevated helper ship with an explicit privileged traversal fallback",
+        "evidence": [
+          "command_run:C:\\Users\\user\\.github\\voidspace\\.worktrees\\voidspace-v1\\.project-flow\\evidence\\elevated-fileops.command_run.json"
+        ],
+        "verify_evidence": "command_run:C:\\Users\\user\\.github\\voidspace\\.worktrees\\voidspace-v1\\.project-flow\\evidence\\elevated-fileops.command_run.json",
+        "evidence_artifacts": [
+          "C:\\Users\\user\\.github\\voidspace\\.worktrees\\voidspace-v1\\.project-flow\\evidence\\20260825T185556_elevated-fileops_1.json"
+        ]
+      },
+      {
+        "id": "artifacts",
+        "title": "Snapshots, exports, settings, and diagnostics",
+        "priority": "high",
+        "owner": "shaw",
+        "status": "done",
+        "source": "project-storm",
+        "task_type": "workstream",
+        "parent_id": null,
+        "component": "artifacts",
+        "executor": "shaw",
+        "context": "",
+        "acceptance": "Snapshot round-trip and hostile-input tests pass; four exports and atomic settings work",
+        "verify": "cargo test -p voidspace-export -p voidspace-app",
+        "dependencies": [],
+        "risk": "",
+        "constraints": [],
+        "affected_modules": [
+          "artifacts"
+        ],
+        "do_not": [],
+        "return": [],
+        "notes": [
+          "[2026-08-25T18:56:03Z] shaw start by shaw",
+          "[2026-08-25T19:01:58Z] outcome: Versioned checksummed snapshots, four injection-safe reports, atomic settings, and redacted diagnostics are implemented and exposed in the UI",
+          "[2026-08-25T19:01:58Z] verify evidence: command_run:C:\\Users\\user\\.github\\voidspace\\.worktrees\\voidspace-v1\\.project-flow\\evidence\\artifacts.command_run.json"
+        ],
+        "next_action": "",
+        "updated_at": "2026-08-25T19:01:58Z",
+        "outcome": "Versioned checksummed snapshots, four injection-safe reports, atomic settings, and redacted diagnostics are implemented and exposed in the UI",
+        "evidence": [
+          "command_run:C:\\Users\\user\\.github\\voidspace\\.worktrees\\voidspace-v1\\.project-flow\\evidence\\artifacts.command_run.json"
+        ],
+        "verify_evidence": "command_run:C:\\Users\\user\\.github\\voidspace\\.worktrees\\voidspace-v1\\.project-flow\\evidence\\artifacts.command_run.json",
+        "evidence_artifacts": [
+          "C:\\Users\\user\\.github\\voidspace\\.worktrees\\voidspace-v1\\.project-flow\\evidence\\20260825T190158_artifacts_1.json"
+        ]
+      },
+      {
+        "id": "release",
+        "title": "Integration, hardening, and portable Windows release",
+        "priority": "critical",
+        "owner": "shaw",
+        "status": "done",
+        "source": "project-storm",
+        "task_type": "workstream",
+        "parent_id": null,
+        "component": "release",
+        "executor": "shaw",
+        "context": "",
+        "acceptance": "Fmt, clippy, workspace tests, release build, smoke script, and portable zip all pass",
+        "verify": "powershell -ExecutionPolicy Bypass -File scripts/package.ps1",
+        "dependencies": [],
+        "risk": "",
+        "constraints": [],
+        "affected_modules": [
+          "release"
+        ],
+        "do_not": [],
+        "return": [],
+        "notes": [
+          "[2026-08-25T19:02:07Z] shaw start by shaw",
+          "[2026-08-25T19:14:01Z] outcome: Windows portable release 0.1.0 packaged; fmt, clippy, workspace tests, release build, smoke scenario, manifest verification, and visual packaged-app inspection passed.",
+          "[2026-08-25T19:14:01Z] verify evidence: command_run:C:\\Users\\user\\.github\\voidspace\\.worktrees\\voidspace-v1\\.project-flow\\evidence\\release.command_run.json"
+        ],
+        "next_action": "",
+        "updated_at": "2026-08-25T19:14:01Z",
+        "outcome": "Windows portable release 0.1.0 packaged; fmt, clippy, workspace tests, release build, smoke scenario, manifest verification, and visual packaged-app inspection passed.",
+        "evidence": [
+          "command_run:C:\\Users\\user\\.github\\voidspace\\.worktrees\\voidspace-v1\\.project-flow\\evidence\\release.command_run.json"
+        ],
+        "verify_evidence": "command_run:C:\\Users\\user\\.github\\voidspace\\.worktrees\\voidspace-v1\\.project-flow\\evidence\\release.command_run.json",
+        "evidence_artifacts": [
+          "C:\\Users\\user\\.github\\voidspace\\.worktrees\\voidspace-v1\\.project-flow\\evidence\\20260825T191401_release_1.json"
         ]
       }
     ],

@@ -1,0 +1,24 @@
+{
+  "schema": "project_flow.evidence_artifact.v2",
+  "producer": "project-flow",
+  "task_id": "elevated-fileops",
+  "validated_at": "2026-08-25T18:55:56Z",
+  "ref_sha256": "f9aa7ef645dc361fb7e6c16e678d84a680d40e9f16f99da3b67abc98d6773d84",
+  "parent_evidence_refs": [],
+  "evidence": {
+    "ref": "command_run:C:\\Users\\user\\.github\\voidspace\\.worktrees\\voidspace-v1\\.project-flow\\evidence\\elevated-fileops.command_run.json",
+    "kind": "command_run",
+    "target": "C:\\Users\\user\\.github\\voidspace\\.worktrees\\voidspace-v1\\.project-flow\\evidence\\elevated-fileops.command_run.json",
+    "metadata": {
+      "schema": "shaw.command_run.v1",
+      "producer": "shaw",
+      "kind": "test",
+      "status": "pass",
+      "exit_code": 0,
+      "task_id": "elevated-fileops",
+      "run_id": null,
+      "parent_evidence_refs": []
+    },
+    "task_id": "elevated-fileops"
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "schema": "shaw.command_run.v1",
+  "producer": "shaw",
+  "kind": "test",
+  "status": "pass",
+  "exit_code": 0,
+  "command": [
+    "cargo",
+    "test",
+    "-p",
+    "voidspace-export",
+    "-p",
+    "voidspace-app"
+  ],
+  "command_sha256": "bf9678e90f7e40772e261a68d922ae0f5f3ee8143520124691607284eabf8d6e",
+  "raw_command_sha256": "bf9678e90f7e40772e261a68d922ae0f5f3ee8143520124691607284eabf8d6e",
+  "command_redacted": false,
+  "stdout_sha256": "383bd44baf2d567fc7dde2c38663fd34c14364911b54d3f99d2344cdaf143f37",
+  "stderr_sha256": "2ce36cb6849ce311e0bffaf91f52b4b5abb338e8c74c63a7e6b4882495b50027",
+  "started_at": "2026-08-25T19:01:31Z",
+  "finished_at": "2026-08-25T19:01:34Z",
+  "task_id": "artifacts",
+  "run_id": null,
+  "parent_evidence_refs": [],
+  "evidence_ref": "command_run:C:\\Users\\user\\.github\\voidspace\\.worktrees\\voidspace-v1\\.project-flow\\evidence\\artifacts.command_run.json"
+}

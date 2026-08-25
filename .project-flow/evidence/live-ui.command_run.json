@@ -1,0 +1,30 @@
+{
+  "schema": "shaw.command_run.v1",
+  "producer": "shaw",
+  "kind": "test",
+  "status": "pass",
+  "exit_code": 0,
+  "command": [
+    "cargo",
+    "test",
+    "-p",
+    "voidspace-scan",
+    "-p",
+    "voidspace-filter",
+    "-p",
+    "voidspace-watch",
+    "-p",
+    "voidspace-app"
+  ],
+  "command_sha256": "db1d9cb338d4fb29c95aadb21bdc6e334f1d089017ab614827f09ce1a51a2e95",
+  "raw_command_sha256": "db1d9cb338d4fb29c95aadb21bdc6e334f1d089017ab614827f09ce1a51a2e95",
+  "command_redacted": false,
+  "stdout_sha256": "32e98edba766d83a6eb51ec9acd820a7796b5432919e472c9d9de3748d712570",
+  "stderr_sha256": "2711d05d5cd4a2e8ce6ebac90de34ec2e6076dbbdb9258eb674599848adac582",
+  "started_at": "2026-08-25T18:42:44Z",
+  "finished_at": "2026-08-25T18:42:51Z",
+  "task_id": "live-ui",
+  "run_id": null,
+  "parent_evidence_refs": [],
+  "evidence_ref": "command_run:C:\\Users\\user\\.github\\voidspace\\.worktrees\\voidspace-v1\\.project-flow\\evidence\\live-ui.command_run.json"
+}

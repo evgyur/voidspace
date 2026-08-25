@@ -1,0 +1,24 @@
+{
+  "schema": "project_flow.evidence_artifact.v2",
+  "producer": "project-flow",
+  "task_id": "live-ui",
+  "validated_at": "2026-08-25T18:43:14Z",
+  "ref_sha256": "aeac693e7cf5602ab9f1ee8dedb7a36caedba245b5a80fdf5a38fee3168278e6",
+  "parent_evidence_refs": [],
+  "evidence": {
+    "ref": "command_run:C:\\Users\\user\\.github\\voidspace\\.worktrees\\voidspace-v1\\.project-flow\\evidence\\live-ui.command_run.json",
+    "kind": "command_run",
+    "target": "C:\\Users\\user\\.github\\voidspace\\.worktrees\\voidspace-v1\\.project-flow\\evidence\\live-ui.command_run.json",
+    "metadata": {
+      "schema": "shaw.command_run.v1",
+      "producer": "shaw",
+      "kind": "test",
+      "status": "pass",
+      "exit_code": 0,
+      "task_id": "live-ui",
+      "run_id": null,
+      "parent_evidence_refs": []
+    },
+    "task_id": "live-ui"
+  }
+}

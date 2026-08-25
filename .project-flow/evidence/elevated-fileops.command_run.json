@@ -1,0 +1,26 @@
+{
+  "schema": "shaw.command_run.v1",
+  "producer": "shaw",
+  "kind": "test",
+  "status": "pass",
+  "exit_code": 0,
+  "command": [
+    "cargo",
+    "test",
+    "-p",
+    "voidspace-elevated",
+    "-p",
+    "voidspace-fileops"
+  ],
+  "command_sha256": "848098542665c99be0c1122df495e2777747fe4009d0cb753c4538f22ff53d52",
+  "raw_command_sha256": "848098542665c99be0c1122df495e2777747fe4009d0cb753c4538f22ff53d52",
+  "command_redacted": false,
+  "stdout_sha256": "b2d0f62a09eb087fa86041cf1104acc4ac9ac72bc164feec1be77fc830da8ce3",
+  "stderr_sha256": "1ea7c1d4cf6d5e5bf2194d187381e97fd244cd317db7e6ca5c1cb7770fe84ea3",
+  "started_at": "2026-08-25T18:55:20Z",
+  "finished_at": "2026-08-25T18:55:22Z",
+  "task_id": "elevated-fileops",
+  "run_id": null,
+  "parent_evidence_refs": [],
+  "evidence_ref": "command_run:C:\\Users\\user\\.github\\voidspace\\.worktrees\\voidspace-v1\\.project-flow\\evidence\\elevated-fileops.command_run.json"
+}

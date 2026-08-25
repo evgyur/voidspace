@@ -1,0 +1,24 @@
+{
+  "schema": "project_flow.evidence_artifact.v2",
+  "producer": "project-flow",
+  "task_id": "artifacts",
+  "validated_at": "2026-08-25T19:01:58Z",
+  "ref_sha256": "61a74b168958228d1ad3a798d57bb696a3dd422786d35f05dc8e416420c2d22e",
+  "parent_evidence_refs": [],
+  "evidence": {
+    "ref": "command_run:C:\\Users\\user\\.github\\voidspace\\.worktrees\\voidspace-v1\\.project-flow\\evidence\\artifacts.command_run.json",
+    "kind": "command_run",
+    "target": "C:\\Users\\user\\.github\\voidspace\\.worktrees\\voidspace-v1\\.project-flow\\evidence\\artifacts.command_run.json",
+    "metadata": {
+      "schema": "shaw.command_run.v1",
+      "producer": "shaw",
+      "kind": "test",
+      "status": "pass",
+      "exit_code": 0,
+      "task_id": "artifacts",
+      "run_id": null,
+      "parent_evidence_refs": []
+    },
+    "task_id": "artifacts"
+  }
+}

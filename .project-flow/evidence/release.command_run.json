@@ -1,0 +1,26 @@
+{
+  "schema": "shaw.command_run.v1",
+  "producer": "shaw",
+  "kind": "test",
+  "status": "pass",
+  "exit_code": 0,
+  "command": [
+    "powershell",
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-File",
+    "scripts\\package.ps1"
+  ],
+  "command_sha256": "c026caef1c202ca75b9cd6d94c6145f2f611a004d6c95a64c68469bb70337bfa",
+  "raw_command_sha256": "c026caef1c202ca75b9cd6d94c6145f2f611a004d6c95a64c68469bb70337bfa",
+  "command_redacted": false,
+  "stdout_sha256": "7512cbf577a065673ec7b677ec01fa9ccd3af57bc1f3b2b764dfeeee4d85d996",
+  "stderr_sha256": "8015d9eac580a2eb48ed0a3e7beed63192bc73280f585f9de6cb291d4451c40c",
+  "started_at": "2026-08-25T19:11:36Z",
+  "finished_at": "2026-08-25T19:11:44Z",
+  "task_id": "release",
+  "run_id": null,
+  "parent_evidence_refs": [],
+  "evidence_ref": "command_run:C:\\Users\\user\\.github\\voidspace\\.worktrees\\voidspace-v1\\.project-flow\\evidence\\release.command_run.json"
+}

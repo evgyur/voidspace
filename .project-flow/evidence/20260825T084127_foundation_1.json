@@ -1,0 +1,24 @@
+{
+  "schema": "project_flow.evidence_artifact.v2",
+  "producer": "project-flow",
+  "task_id": "foundation",
+  "validated_at": "2026-08-25T08:41:27Z",
+  "ref_sha256": "b24101009b0c584a68668adf5d5bac3d59ec7e4fec8db2281cb825f37399524b",
+  "parent_evidence_refs": [],
+  "evidence": {
+    "ref": "command_run:C:\\Users\\user\\.github\\voidspace\\.worktrees\\voidspace-v1\\.project-flow\\evidence\\foundation.command_run.json",
+    "kind": "command_run",
+    "target": "C:\\Users\\user\\.github\\voidspace\\.worktrees\\voidspace-v1\\.project-flow\\evidence\\foundation.command_run.json",
+    "metadata": {
+      "schema": "shaw.command_run.v1",
+      "producer": "shaw",
+      "kind": "test",
+      "status": "pass",
+      "exit_code": 0,
+      "task_id": "foundation",
+      "run_id": null,
+      "parent_evidence_refs": []
+    },
+    "task_id": "foundation"
+  }
+}
