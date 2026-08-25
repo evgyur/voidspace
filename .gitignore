@@ -1,0 +1,6 @@
+.worktrees/
+target/
+.shaw/
+STATE.lock
+*.pdb
+*.dmp
