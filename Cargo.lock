@@ -3466,6 +3466,7 @@ dependencies = [
  "voidspace-model",
  "voidspace-scan",
  "voidspace-watch",
+ "windows 0.62.2",
 ]
 
 [[package]]

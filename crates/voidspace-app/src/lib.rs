@@ -5,6 +5,7 @@ pub mod diagnostics;
 pub mod settings;
 mod theme;
 mod treemap;
+mod volume;
 
 pub use app::{VoidspaceApp, WorkspaceMode, workspace_mode};
 pub use treemap::PreviewState;

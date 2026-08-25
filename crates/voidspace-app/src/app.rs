@@ -17,7 +17,7 @@ use voidspace_model::{DirtySet, EventEnvelope, EventPayload, NodeId};
 use voidspace_scan::{ScanHandle, ScanRequest, describe_root, start};
 use voidspace_watch::{WatchHandle, WatchRequest, WatchSignal, watch};
 
-use crate::{settings::Settings, theme, treemap};
+use crate::{settings::Settings, theme, treemap, volume};
 
 const MAX_SCAN_EVENTS_PER_FRAME: usize = 2_048;
 const MAX_SCAN_WORK_PER_FRAME: Duration = Duration::from_millis(5);
@@ -58,6 +58,7 @@ struct ScanTab {
     errors: Vec<String>,
     show_other_for: Option<(NodeId, u32)>,
     preview: treemap::PreviewState,
+    volume_usage: Option<volume::VolumeUsage>,
 }
 
 enum InspectorAction {
@@ -176,6 +177,7 @@ impl VoidspaceApp {
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| root_path.display().to_string());
+        let volume_usage = volume::query(&root_path);
         self.tabs.push(ScanTab {
             title,
             root_path,
@@ -198,6 +200,7 @@ impl VoidspaceApp {
             errors: Vec::new(),
             show_other_for: None,
             preview: treemap::PreviewState::default(),
+            volume_usage,
         });
         self.active_tab = self.tabs.len() - 1;
     }
@@ -206,19 +209,23 @@ impl VoidspaceApp {
         while let Ok(result) = self.fileop_rx.try_recv() {
             self.fileop_running = false;
             match result {
-                Ok(report) if report.failed.is_empty() => {
-                    self.toast = Some(format!("Removed {} item(s)", report.deleted.len()));
-                    if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                Ok(report) => {
+                    self.toast = Some(if report.failed.is_empty() {
+                        format!("Removed {} item(s)", report.deleted.len())
+                    } else {
+                        format!(
+                            "Removed {}; {} failed",
+                            report.deleted.len(),
+                            report.failed.len()
+                        )
+                    });
+                    if !report.deleted.is_empty()
+                        && let Some(tab) = self.tabs.get_mut(self.active_tab)
+                    {
+                        tab.volume_usage = volume::query(&tab.root_path);
                         tab.pending_rescan = true;
                         tab.last_watch_event = Some(Instant::now());
                     }
-                }
-                Ok(report) => {
-                    self.toast = Some(format!(
-                        "Removed {}; {} failed",
-                        report.deleted.len(),
-                        report.failed.len()
-                    ));
                 }
                 Err(error) => self.toast = Some(error),
             }
@@ -294,6 +301,7 @@ impl VoidspaceApp {
         tab.selected = None;
         tab.show_other_for = None;
         tab.preview.clear();
+        tab.volume_usage = volume::query(&tab.root_path);
         let (event_tx, event_rx) = bounded(65_536);
         tab.events = event_rx;
         match start(
@@ -496,8 +504,16 @@ impl VoidspaceApp {
                     .color(theme::MUTED),
             );
             ui.add_space(18.0);
+            let is_scan_root = selected == tab.snapshot.root;
             for (label, value) in [
-                ("Allocated", treemap::format_bytes(node.allocated)),
+                (
+                    if is_scan_root && tab.scanning {
+                        "Indexed so far"
+                    } else {
+                        "Indexed"
+                    },
+                    treemap::format_bytes(node.allocated),
+                ),
                 ("Logical", treemap::format_bytes(node.logical)),
                 ("Children", node.children.len().to_string()),
             ] {
@@ -509,6 +525,30 @@ impl VoidspaceApp {
                     });
                 });
                 ui.add_space(4.0);
+            }
+            if is_scan_root && let Some(usage) = tab.volume_usage {
+                ui.add_space(14.0);
+                ui.label(
+                    egui::RichText::new("DISK / WINDOWS")
+                        .monospace()
+                        .size(10.0)
+                        .color(theme::MUTED),
+                );
+                ui.add_space(4.0);
+                for (label, value) in [
+                    ("Used", volume::format_decimal_bytes(usage.used())),
+                    ("Free", volume::format_decimal_bytes(usage.free)),
+                    ("Capacity", volume::format_decimal_bytes(usage.total)),
+                ] {
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.label(label);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.monospace(value);
+                        });
+                    });
+                    ui.add_space(4.0);
+                }
             }
             ui.add_space(14.0);
             ui.label(
@@ -931,11 +971,22 @@ impl VoidspaceApp {
                         ui.separator();
                         ui.label(format!("{} entries", tab.files_seen));
                         ui.separator();
-                        ui.label(treemap::format_bytes(
-                            tab.snapshot
-                                .node(tab.snapshot.root)
-                                .map_or(0, |node| node.allocated),
+                        ui.label(format!(
+                            "INDEXED {}",
+                            treemap::format_bytes(
+                                tab.snapshot
+                                    .node(tab.snapshot.root)
+                                    .map_or(0, |node| node.allocated),
+                            )
                         ));
+                        if let Some(usage) = tab.volume_usage {
+                            ui.separator();
+                            ui.label(format!(
+                                "DISK USED {} / {}",
+                                volume::format_decimal_bytes(usage.used()),
+                                volume::format_decimal_bytes(usage.total),
+                            ));
+                        }
                         if tab
                             .watcher
                             .as_ref()

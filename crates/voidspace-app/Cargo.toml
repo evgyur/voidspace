@@ -34,5 +34,8 @@ voidspace-model = { path = "../voidspace-model" }
 voidspace-scan = { path = "../voidspace-scan" }
 voidspace-watch = { path = "../voidspace-watch" }
 
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = ["Win32_Storage_FileSystem"] }
+
 [dev-dependencies]
 tempfile.workspace = true
