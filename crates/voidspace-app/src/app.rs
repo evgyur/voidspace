@@ -5,6 +5,7 @@ use std::{
 
 use crossbeam_channel::{Receiver, Sender, bounded};
 use eframe::egui;
+use voidspace_export::{ReportFormat, export_report, save_snapshot};
 use voidspace_fileops::{
     CancellationToken, ConfirmableOperation, OperationDraft, OperationKind, OperationReport,
     confirm, execute, prepare, reveal_in_explorer,
@@ -16,7 +17,7 @@ use voidspace_model::{DirtySet, EventEnvelope, EventPayload, NodeId};
 use voidspace_scan::{ScanHandle, ScanRequest, describe_root, start};
 use voidspace_watch::{WatchHandle, WatchRequest, WatchSignal, watch};
 
-use crate::{theme, treemap};
+use crate::{settings::Settings, theme, treemap};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkspaceMode {
@@ -61,6 +62,11 @@ enum InspectorAction {
     Permanent(PathBuf),
 }
 
+enum ArtifactAction {
+    Snapshot,
+    Report(ReportFormat),
+}
+
 struct FileOpDialog {
     operation: ConfirmableOperation,
     phrase: String,
@@ -81,12 +87,14 @@ pub struct VoidspaceApp {
     fileop_rx: Receiver<Result<OperationReport, String>>,
     fileop_running: bool,
     turbo_session: bool,
+    settings: Settings,
 }
 
 impl VoidspaceApp {
     pub fn new(context: &eframe::CreationContext<'_>) -> Self {
         theme::install(&context.egui_ctx);
-        let default_scope = std::env::var("USERPROFILE").unwrap_or_else(|_| "C:\\".into());
+        let settings = Settings::load();
+        let default_scope = settings.last_scope.clone();
         let (fileop_tx, fileop_rx) = bounded(4);
         let mut app = Self {
             tabs: Vec::new(),
@@ -103,6 +111,7 @@ impl VoidspaceApp {
             fileop_rx,
             fileop_running: false,
             turbo_session: std::env::args().any(|argument| argument == "--turbo"),
+            settings,
         };
         let arguments: Vec<String> = std::env::args().collect();
         if let Some(index) = arguments.iter().position(|argument| argument == "--scan")
@@ -115,6 +124,10 @@ impl VoidspaceApp {
     }
 
     fn start_scan(&mut self, root_path: PathBuf) {
+        self.settings.last_scope = root_path.display().to_string();
+        if let Err(error) = self.settings.save() {
+            let _ = crate::diagnostics::log_line(&format!("settings save failed: {error}"));
+        }
         let scan_id = self.next_scan_id;
         self.next_scan_id += 1;
         let generation = 1;
@@ -368,6 +381,7 @@ impl VoidspaceApp {
             return;
         }
         let mut rescan = false;
+        let mut artifact_action = None;
         egui::Panel::top("scan-toolbar")
             .exact_size(42.0)
             .frame(
@@ -394,6 +408,22 @@ impl VoidspaceApp {
                     if ui.button("RESCAN").clicked() {
                         rescan = true;
                     }
+                    if ui.button("SNAPSHOT").clicked() {
+                        artifact_action = Some(ArtifactAction::Snapshot);
+                    }
+                    ui.menu_button("EXPORT", |ui| {
+                        for (label, format) in [
+                            ("CSV", ReportFormat::Csv),
+                            ("JSON", ReportFormat::Json),
+                            ("HTML", ReportFormat::Html),
+                            ("TEXT", ReportFormat::Text),
+                        ] {
+                            if ui.button(label).clicked() {
+                                artifact_action = Some(ArtifactAction::Report(format));
+                                ui.close();
+                            }
+                        }
+                    });
                     ui.separator();
                     ui.label(
                         egui::RichText::new(if tab.paused {
@@ -423,6 +453,38 @@ impl VoidspaceApp {
             });
         if rescan {
             self.restart_tab(self.active_tab);
+        }
+        if let Some(action) = artifact_action {
+            self.save_artifact(action);
+        }
+    }
+
+    fn save_artifact(&mut self, action: ArtifactAction) {
+        let snapshot = self.tabs[self.active_tab].snapshot.clone();
+        let (extension, description) = match action {
+            ArtifactAction::Snapshot => ("voidspace", "Voidspace snapshot"),
+            ArtifactAction::Report(ReportFormat::Csv) => ("csv", "CSV report"),
+            ArtifactAction::Report(ReportFormat::Json) => ("json", "JSON report"),
+            ArtifactAction::Report(ReportFormat::Html) => ("html", "HTML report"),
+            ArtifactAction::Report(ReportFormat::Text) => ("txt", "Text report"),
+        };
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter(description, &[extension])
+            .set_file_name(format!("voidspace-report.{extension}"))
+            .save_file()
+        else {
+            return;
+        };
+        let result = match action {
+            ArtifactAction::Snapshot => save_snapshot(&path, &snapshot),
+            ArtifactAction::Report(format) => export_report(&path, &snapshot, format),
+        };
+        match result {
+            Ok(()) => self.toast = Some(format!("Saved {}", path.display())),
+            Err(error) => {
+                let _ = crate::diagnostics::log_line(&format!("artifact save failed: {error}"));
+                self.toast = Some(error.to_string());
+            }
         }
     }
 
