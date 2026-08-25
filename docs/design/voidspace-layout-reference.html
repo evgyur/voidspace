@@ -73,11 +73,12 @@
   </style>
 </head>
 <body>
-  <main class="app" data-reference-min-width="800" data-reference-min-height="600">
+  <!-- Geometry-only reference: at narrow widths this captures the drawer-closed state. -->
+  <main class="app" data-reference-state="drawer-closed" data-reference-min-width="800" data-reference-min-height="600">
     <header class="topbar">
       <div class="brand">VOIDSPACE</div>
       <div class="crumbs">C: › Users › user › AppData</div>
-      <input class="filter" aria-label="Filter" value="size > 1 GiB AND NOT is:system">
+      <input class="filter" aria-label="Filter" value="size > 1GiB AND NOT attr:system">
       <button class="scan">TURBO / F5</button>
       <div class="admin">ADMIN</div>
       <button class="drawer-toggle">DETAILS</button>
