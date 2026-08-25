@@ -1,0 +1,26 @@
+{
+  "schema": "shaw.command_run.v1",
+  "producer": "shaw",
+  "kind": "test",
+  "status": "pass",
+  "exit_code": 0,
+  "command": [
+    "cargo",
+    "test",
+    "-p",
+    "voidspace-index",
+    "-p",
+    "voidspace-layout"
+  ],
+  "command_sha256": "dc83081b01b70856ef2c1ab160d2c33165af95190770dee6ddeecf3815ebd8f5",
+  "raw_command_sha256": "dc83081b01b70856ef2c1ab160d2c33165af95190770dee6ddeecf3815ebd8f5",
+  "command_redacted": false,
+  "stdout_sha256": "a1855e0a8f2ff6d57f56a008d683cf0be795a899659a4c5454d23f3f066b30fd",
+  "stderr_sha256": "fe345721a093606d949332f22cdad324cc246f35a80f2ba8a4832e6d215afb5d",
+  "started_at": "2026-08-25T08:41:09Z",
+  "finished_at": "2026-08-25T08:41:10Z",
+  "task_id": "foundation",
+  "run_id": null,
+  "parent_evidence_refs": [],
+  "evidence_ref": "command_run:C:\\Users\\user\\.github\\voidspace\\.worktrees\\voidspace-v1\\.project-flow\\evidence\\foundation.command_run.json"
+}

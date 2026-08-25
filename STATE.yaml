@@ -1,0 +1,465 @@
+{
+  "version": 5,
+  "project": "Voidspace",
+  "updated_at": "2026-08-25T08:41:27Z",
+  "owner": "Codex",
+  "portfolio": {
+    "project_priority": "normal",
+    "dispatch_cooldown_minutes": 15
+  },
+  "platform": {
+    "layer": "project-flow-execution-os",
+    "contract_version": "v1",
+    "execution_model": "declarative-state-plus-append-only-events",
+    "planes": {
+      "authoring": "project-storm and human planning inputs",
+      "planning": "project-flow backlog normalization and slice readiness",
+      "scheduling": "selection, admission control, deadlines, and budgets",
+      "execution": "executor routing, dispatch, lease ownership, and result delivery",
+      "verification": "evidence attachment and done/blocked write-back",
+      "governance": "human gates, nudges, escalation, and safety policies",
+      "observability": "status, review, portfolio, and append-only event ledger"
+    },
+    "entity_kinds": [
+      "goal",
+      "plan",
+      "slice",
+      "run",
+      "lease",
+      "checkpoint",
+      "evidence",
+      "policy",
+      "escalation",
+      "capability",
+      "actor",
+      "artifact"
+    ],
+    "contracts": {
+      "task_request": {
+        "required": [
+          "sliceId",
+          "objective",
+          "acceptance",
+          "verify",
+          "executor",
+          "timeout",
+          "escalationPolicy"
+        ]
+      },
+      "result_envelope": {
+        "required": [
+          "runId",
+          "classification",
+          "outcome",
+          "evidence"
+        ],
+        "allowed_classifications": [
+          "blocked",
+          "cancelled",
+          "deferred",
+          "done",
+          "failed_retryable",
+          "failed_terminal",
+          "needs_human",
+          "partial"
+        ]
+      },
+      "lease": {
+        "required": [
+          "runId",
+          "sliceId",
+          "leaseExpiresAt"
+        ]
+      }
+    },
+    "policies": {
+      "queue_classes": {
+        "fastlane": {
+          "score_bonus": 25,
+          "description": "Latency-sensitive slices that should win ties"
+        },
+        "default": {
+          "score_bonus": 0,
+          "description": "Normal execution class"
+        },
+        "background": {
+          "score_bonus": -20,
+          "description": "Low-urgency slices that should yield to active work"
+        }
+      },
+      "retry_policy": {
+        "failed_retryable": {
+          "max_retries": 3,
+          "backoff_minutes": [
+            5,
+            15,
+            60
+          ]
+        },
+        "partial": {
+          "max_retries": 2,
+          "backoff_minutes": [
+            10,
+            30
+          ]
+        },
+        "deferred": {
+          "max_retries": 99,
+          "backoff_minutes": [
+            15
+          ]
+        }
+      },
+      "portfolio_dispatch": {
+        "project_priority_bonus": {
+          "urgent": 40,
+          "high": 20,
+          "normal": 0,
+          "background": -20
+        },
+        "fairness_bonus_per_idle_hour": 5,
+        "max_fairness_bonus": 30,
+        "recent_dispatch_penalty": 20,
+        "open_nudge_penalty": 5,
+        "blocked_penalty": 3,
+        "pending_async_penalty": 10,
+        "stale_in_progress_penalty": 10
+      },
+      "portfolio_runtime": {
+        "max_active_runs": 2,
+        "max_expensive_runs": 1,
+        "max_active_projects": 2,
+        "selection_backoff_minutes": 5,
+        "max_active_runs_per_project": 1,
+        "max_recent_selections": 2,
+        "recent_selection_window_minutes": 15,
+        "allow_urgent_override": 1,
+        "urgent_override_priority": 80,
+        "max_urgent_override_bursts": 1,
+        "urgent_override_window_minutes": 60
+      }
+    },
+    "executors": [
+      {
+        "id": "shaw",
+        "kind": "governor",
+        "aliases": [
+          "default"
+        ],
+        "modes": [
+          "plan",
+          "command",
+          "async",
+          "simulate"
+        ],
+        "capabilities": [
+          "plan.slice",
+          "verify.evidence",
+          "code.exec"
+        ],
+        "requires_workers": false,
+        "cost_class": "normal"
+      },
+      {
+        "id": "inline",
+        "kind": "local",
+        "aliases": [
+          "local"
+        ],
+        "modes": [
+          "command",
+          "simulate"
+        ],
+        "capabilities": [
+          "local.exec"
+        ],
+        "requires_workers": false,
+        "cost_class": "normal"
+      },
+      {
+        "id": "subagent",
+        "kind": "worker",
+        "aliases": [
+          "worker"
+        ],
+        "modes": [
+          "plan",
+          "async"
+        ],
+        "capabilities": [
+          "task.exec",
+          "async.dispatch"
+        ],
+        "requires_workers": true,
+        "cost_class": "expensive"
+      },
+      {
+        "id": "acp_session",
+        "kind": "worker",
+        "aliases": [
+          "acp"
+        ],
+        "modes": [
+          "plan",
+          "async"
+        ],
+        "capabilities": [
+          "session.exec",
+          "async.dispatch"
+        ],
+        "requires_workers": true,
+        "cost_class": "expensive"
+      },
+      {
+        "id": "deferred_retry",
+        "kind": "scheduler",
+        "aliases": [],
+        "modes": [
+          "plan",
+          "async"
+        ],
+        "capabilities": [
+          "time.defer"
+        ],
+        "requires_workers": false,
+        "cost_class": "cheap"
+      },
+      {
+        "id": "human_gate",
+        "kind": "human",
+        "aliases": [
+          "manual",
+          "human"
+        ],
+        "modes": [
+          "plan"
+        ],
+        "capabilities": [
+          "approval.required"
+        ],
+        "requires_workers": false,
+        "cost_class": "cheap"
+      }
+    ],
+    "event_stream": {
+      "enabled": true,
+      "relative_path": ".project-flow/event-log.jsonl",
+      "last_sequence": 0,
+      "last_emitted_event_index": 0,
+      "last_emitted_at": null
+    }
+  },
+  "intake": {
+    "primary_planner": "project-storm",
+    "delivery_engine": "shaw",
+    "contract": [
+      "project-storm формирует эпики, решения и workstreams",
+      "project-flow нормализует их в backlog/state",
+      "shaw исполняет non-trivial engineering tasks с verify evidence"
+    ]
+  },
+  "lanes": {
+    "todo": [
+      {
+        "id": "live-ui",
+        "title": "Spectral UI, normal scanner, filters, and live watcher",
+        "priority": "critical",
+        "owner": "Codex",
+        "status": "todo",
+        "source": "project-storm",
+        "task_type": "workstream",
+        "parent_id": null,
+        "component": "app",
+        "executor": "shaw",
+        "context": "",
+        "acceptance": "Desktop app scans a selected scope, streams treemap results, filters and reconciles live mutations",
+        "verify": "cargo test -p voidspace-scan -p voidspace-filter -p voidspace-watch -p voidspace-app",
+        "dependencies": [],
+        "risk": "",
+        "constraints": [],
+        "affected_modules": [
+          "app"
+        ],
+        "do_not": [],
+        "return": [],
+        "notes": [],
+        "next_action": "",
+        "updated_at": "2026-08-25T08:32:46Z"
+      },
+      {
+        "id": "elevated-fileops",
+        "title": "Elevated helper, Turbo scan, and safe file actions",
+        "priority": "critical",
+        "owner": "Codex",
+        "status": "todo",
+        "source": "project-storm",
+        "task_type": "workstream",
+        "parent_id": null,
+        "component": "windows",
+        "executor": "shaw",
+        "context": "",
+        "acceptance": "Typed helper builds; UAC/Turbo path works; recycle and guarded permanent delete pass temp-volume tests",
+        "verify": "cargo test -p voidspace-elevated -p voidspace-fileops",
+        "dependencies": [],
+        "risk": "",
+        "constraints": [],
+        "affected_modules": [
+          "windows"
+        ],
+        "do_not": [],
+        "return": [],
+        "notes": [],
+        "next_action": "",
+        "updated_at": "2026-08-25T08:32:47Z"
+      },
+      {
+        "id": "artifacts",
+        "title": "Snapshots, exports, settings, and diagnostics",
+        "priority": "high",
+        "owner": "Codex",
+        "status": "todo",
+        "source": "project-storm",
+        "task_type": "workstream",
+        "parent_id": null,
+        "component": "artifacts",
+        "executor": "shaw",
+        "context": "",
+        "acceptance": "Snapshot round-trip and hostile-input tests pass; four exports and atomic settings work",
+        "verify": "cargo test -p voidspace-export -p voidspace-app",
+        "dependencies": [],
+        "risk": "",
+        "constraints": [],
+        "affected_modules": [
+          "artifacts"
+        ],
+        "do_not": [],
+        "return": [],
+        "notes": [],
+        "next_action": "",
+        "updated_at": "2026-08-25T08:32:47Z"
+      },
+      {
+        "id": "release",
+        "title": "Integration, hardening, and portable Windows release",
+        "priority": "critical",
+        "owner": "Codex",
+        "status": "todo",
+        "source": "project-storm",
+        "task_type": "workstream",
+        "parent_id": null,
+        "component": "release",
+        "executor": "shaw",
+        "context": "",
+        "acceptance": "Fmt, clippy, workspace tests, release build, smoke script, and portable zip all pass",
+        "verify": "powershell -ExecutionPolicy Bypass -File scripts/package.ps1",
+        "dependencies": [],
+        "risk": "",
+        "constraints": [],
+        "affected_modules": [
+          "release"
+        ],
+        "do_not": [],
+        "return": [],
+        "notes": [],
+        "next_action": "",
+        "updated_at": "2026-08-25T08:32:47Z"
+      }
+    ],
+    "in_progress": [],
+    "blocked": [],
+    "done": [
+      {
+        "id": "foundation",
+        "title": "Rust foundation, model, index, and layout",
+        "priority": "critical",
+        "owner": "Codex",
+        "status": "done",
+        "source": "project-storm",
+        "task_type": "workstream",
+        "parent_id": null,
+        "component": "core",
+        "executor": "shaw",
+        "context": "",
+        "acceptance": "Workspace compiles; lossless model, reducer, and treemap invariants pass",
+        "verify": "cargo test -p voidspace-index -p voidspace-layout",
+        "dependencies": [],
+        "risk": "",
+        "constraints": [],
+        "affected_modules": [
+          "core"
+        ],
+        "do_not": [],
+        "return": [],
+        "notes": [
+          "[2026-08-25T08:33:05Z] shaw start by Codex",
+          "[2026-08-25T08:41:27Z] outcome: Rust workspace, lossless WinName model, arena reducer index, hard-link accounting, and deterministic treemap layout verified",
+          "[2026-08-25T08:41:27Z] verify evidence: command_run:C:\\Users\\user\\.github\\voidspace\\.worktrees\\voidspace-v1\\.project-flow\\evidence\\foundation.command_run.json"
+        ],
+        "next_action": "",
+        "updated_at": "2026-08-25T08:41:27Z",
+        "outcome": "Rust workspace, lossless WinName model, arena reducer index, hard-link accounting, and deterministic treemap layout verified",
+        "evidence": [
+          "command_run:C:\\Users\\user\\.github\\voidspace\\.worktrees\\voidspace-v1\\.project-flow\\evidence\\foundation.command_run.json"
+        ],
+        "verify_evidence": "command_run:C:\\Users\\user\\.github\\voidspace\\.worktrees\\voidspace-v1\\.project-flow\\evidence\\foundation.command_run.json",
+        "evidence_artifacts": [
+          "C:\\Users\\user\\.github\\voidspace\\.worktrees\\voidspace-v1\\.project-flow\\evidence\\20260825T084127_foundation_1.json"
+        ]
+      }
+    ],
+    "cancelled": []
+  },
+  "orchestrator": {
+    "enabled": true,
+    "mode": "semi_auto",
+    "max_active_slices": 2,
+    "max_expensive_runs": 1,
+    "default_executor": "shaw",
+    "heartbeat_interval_minutes": 30,
+    "stale_after_minutes": 90,
+    "escalate_after_minutes": 240,
+    "stale_todo_after_minutes": 1440,
+    "lease_timeout_minutes": 120,
+    "deadline_urgent_hours": 24,
+    "runs": [],
+    "evidence": [],
+    "checkpoints": [],
+    "events": [],
+    "nudges": [],
+    "applied_results": [],
+    "metrics": {
+      "picked": 0,
+      "launched": 0,
+      "verified_done": 0,
+      "blocked": 0,
+      "needs_human": 0,
+      "deferred": 0,
+      "cancelled": 0,
+      "failed": 0,
+      "recovered_orphaned": 0,
+      "sweeps": 0,
+      "stale_detected": 0,
+      "escalations": 0,
+      "nudges_created": 0,
+      "async_dispatched": 0,
+      "async_reconciled": 0,
+      "async_skipped_duplicate": 0,
+      "async_skipped_stale": 0,
+      "leases_expired": 0,
+      "requeued_expired": 0
+    },
+    "watchdog_stall_seconds": 300
+  },
+  "agents": {
+    "coordinator": {
+      "role": "main-session"
+    },
+    "workers": []
+  },
+  "rules": [
+    "Одна задача одновременно у одного owner",
+    "Любой блокер фиксировать в blocked с note",
+    "После done обязательно указать outcome в note",
+    "Все engineering-задачи из project-storm проходят через shaw verify contract"
+  ]
+}
