@@ -1,0 +1,15 @@
+[package]
+name = "voidspace-layout"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+voidspace-index = { path = "../voidspace-index" }
+voidspace-model = { path = "../voidspace-model" }
+
+[dev-dependencies]
+proptest.workspace = true
+
