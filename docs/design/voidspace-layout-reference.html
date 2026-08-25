@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Voidspace — geometric layout reference</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #070809;
+      --surface: #0d0f11;
+      --raised: #111419;
+      --line: #2a2e34;
+      --muted: #8e949d;
+      --text: #f2f3f5;
+      --orange: #ff5a2f;
+      --cyan: #19d3ff;
+      --lime: #c9f65a;
+      --magenta: #ff4ecd;
+      --violet: #8b5cf6;
+      font: 13px/1.35 "Segoe UI Variable", "Segoe UI", sans-serif;
+    }
+    * { box-sizing: border-box; min-width: 0; }
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: var(--bg); color: var(--text); }
+    button, input { font: inherit; color: inherit; }
+    .app { display: grid; grid-template-rows: 56px 38px minmax(0, 1fr) 30px; height: 100vh; }
+    .topbar { display: grid; grid-template-columns: auto minmax(180px, 1fr) minmax(180px, 340px) auto auto; gap: 10px; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--line); background: var(--surface); }
+    .brand { font-size: 11px; font-weight: 800; letter-spacing: .18em; color: var(--orange); }
+    .crumbs, .filter { height: 36px; display: flex; align-items: center; border: 1px solid var(--line); background: var(--bg); padding: 0 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .filter { width: 100%; outline: none; }
+    .scan { height: 36px; border: 0; padding: 0 16px; background: var(--orange); color: #090909; font-weight: 800; }
+    .admin { color: var(--orange); border: 1px solid var(--orange); padding: 7px 9px; font: 700 10px/1 monospace; letter-spacing: .1em; }
+    .tabs { display: flex; align-items: end; gap: 2px; padding: 0 12px; border-bottom: 1px solid var(--line); background: var(--surface); overflow: hidden; }
+    .tab { height: 31px; max-width: 260px; padding: 8px 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--muted); border-bottom: 2px solid transparent; }
+    .tab.active { color: var(--text); border-color: var(--orange); background: var(--raised); }
+    .workspace { display: grid; grid-template-columns: minmax(560px, 1fr) 320px; min-height: 0; }
+    .map { position: relative; min-width: 560px; min-height: 360px; padding: 8px; overflow: hidden; background: #090a0c; }
+    .treemap { display: grid; grid-template-columns: 1.45fr .8fr .62fr; grid-template-rows: 1.2fr .8fr; gap: 4px; width: 100%; height: 100%; }
+    .tile { position: relative; overflow: hidden; border: 1px solid color-mix(in srgb, var(--tile) 58%, #15171a); background: color-mix(in srgb, var(--tile) 18%, #0b0c0e); padding: 10px; }
+    .tile strong, .tile span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .tile strong { font-size: 14px; }
+    .tile span { color: #b7bbc1; font: 11px/1.4 monospace; }
+    .tile.big { grid-row: 1 / span 2; --tile: var(--orange); }
+    .tile.cyan { --tile: var(--cyan); }
+    .tile.lime { --tile: var(--lime); }
+    .tile.magenta { --tile: var(--magenta); }
+    .tile.violet { --tile: var(--violet); }
+    .inspector { min-width: 0; overflow: auto; border-left: 1px solid var(--line); background: var(--surface); padding: 16px; }
+    .eyebrow { margin: 0 0 8px; color: var(--muted); font: 10px/1 monospace; letter-spacing: .16em; text-transform: uppercase; }
+    h1 { margin: 0; font-size: 22px; overflow-wrap: anywhere; }
+    .path { margin: 6px 0 18px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .metric { display: grid; grid-template-columns: 1fr auto; gap: 10px; padding: 12px 0; border-top: 1px solid var(--line); }
+    .metric b { font-family: ui-monospace, monospace; }
+    .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 18px; }
+    .actions button { min-height: 36px; border: 1px solid var(--line); background: var(--raised); }
+    .actions .danger { grid-column: 1 / -1; color: var(--orange); border-color: var(--orange); }
+    .status { display: flex; align-items: center; gap: 18px; padding: 0 12px; border-top: 1px solid var(--line); color: var(--muted); background: var(--surface); white-space: nowrap; overflow: hidden; }
+    .status b { color: var(--lime); }
+    .drawer-toggle { display: none; height: 36px; border: 1px solid var(--line); background: var(--raised); }
+    @media (max-width: 899px) {
+      .topbar { grid-template-columns: auto minmax(130px, 1fr) minmax(150px, 220px) auto auto; }
+      .admin { display: none; }
+      .scan { padding-inline: 11px; }
+      .drawer-toggle { display: block; }
+      .workspace { grid-template-columns: minmax(0, 1fr); }
+      .map { min-width: 0; }
+      .inspector { display: none; }
+    }
+    @media (max-height: 640px) {
+      .app { grid-template-rows: 50px 34px minmax(0, 1fr) 28px; }
+      .inspector { top: 84px; bottom: 28px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="app" data-reference-min-width="800" data-reference-min-height="600">
+    <header class="topbar">
+      <div class="brand">VOIDSPACE</div>
+      <div class="crumbs">C: › Users › user › AppData</div>
+      <input class="filter" aria-label="Filter" value="size > 1 GiB AND NOT is:system">
+      <button class="scan">TURBO / F5</button>
+      <div class="admin">ADMIN</div>
+      <button class="drawer-toggle">DETAILS</button>
+    </header>
+    <nav class="tabs" aria-label="Scans">
+      <div class="tab active">C: · LIVE</div>
+      <div class="tab">Downloads · STATIC</div>
+    </nav>
+    <section class="workspace">
+      <section class="map" aria-label="Treemap">
+        <div class="treemap">
+          <article class="tile big"><strong>AppData</strong><span>42.8 GiB · 51%</span></article>
+          <article class="tile cyan"><strong>Games</strong><span>18.2 GiB</span></article>
+          <article class="tile lime"><strong>Projects</strong><span>11.6 GiB</span></article>
+          <article class="tile magenta"><strong>Media</strong><span>8.1 GiB</span></article>
+          <article class="tile violet"><strong>Other</strong><span>3.4 GiB</span></article>
+        </div>
+      </section>
+      <aside class="inspector">
+        <p class="eyebrow">Object / 01</p>
+        <h1>AppData</h1>
+        <p class="path">C:\Users\user\AppData</p>
+        <div class="metric"><span>Allocated</span><b>42.8 GiB</b></div>
+        <div class="metric"><span>Logical</span><b>45.1 GiB</b></div>
+        <div class="metric"><span>Files</span><b>128 402</b></div>
+        <div class="actions">
+          <button>Explorer</button><button>Copy path</button>
+          <button class="danger">Delete permanently</button>
+        </div>
+      </aside>
+    </section>
+    <footer class="status"><span><b>LIVE</b> · healthy</span><span>1 284 991 files</span><span>p95 47 ms</span></footer>
+  </main>
+</body>
+</html>

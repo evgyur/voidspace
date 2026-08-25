@@ -67,7 +67,7 @@ Voidspace — быстрый Windows-анализатор дискового п�
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-При ширине меньше 1180 px inspector превращается в overlay drawer; меньше 900 px вторичные кнопки top bar уходят в меню, но breadcrumbs, фильтр и scan state остаются видимыми. Минимальный размер окна — 800×600. При недостатке высоты inspector скроллится независимо, treemap не перекрывается. Геометрический prototype проверен на 1440×900, 1280×720 и 1024×768: пересечений соседних элементов и выходов дочерних блоков за границы нет.
+До ширины 900 px inspector остаётся docked; ниже 900 px он закрыт по умолчанию и открывается кнопкой Details как modal drawer с focus trap, scrim и Escape-to-close. Вторичные кнопки top bar уходят в меню, но breadcrumbs, фильтр и scan state остаются видимыми. Минимальный размер окна — 800×600. При недостатке высоты inspector скроллится независимо; в обычном состоянии treemap не перекрывается, а открытый modal drawer явно блокирует взаимодействие с canvas. Проверяемый geometric prototype хранится в [`docs/design/voidspace-layout-reference.html`](../../design/voidspace-layout-reference.html). Он проверен на 1440×900, 1280×720 и 1024×768: пересечений соседних элементов и выходов дочерних блоков за границы нет.
 
 ## 6. Основные пользовательские потоки
 
@@ -248,7 +248,7 @@ export(IndexSnapshot, ExportProfile, AtomicTarget, CancellationToken) -> Artifac
 
 ### 8.11 `voidspace-elevated`
 
-Минимальный helper с манифестом `requireAdministrator`. Принимает строго типизированные запросы Turbo Scan и защищённых операций по локальному authenticated IPC. Проверяет вызывающий процесс, нормализует пути и не предоставляет универсальную командную оболочку.
+Минимальный helper с манифестом `requireAdministrator`. Принимает строго типизированные запросы Turbo Scan, `PrivilegedSubtreeScan` и защищённых операций по локальному authenticated IPC. Проверяет вызывающий процесс, нормализует пути и не предоставляет универсальную командную оболочку.
 
 Контракт: versioned length-prefixed binary messages `Hello/Challenge/Auth/Request/Progress/Result/Error/Cancel/Goodbye`; подробности lifecycle и защиты — раздел 23.
 
@@ -366,7 +366,7 @@ Benchmark protocol: release build, plugged-in power profile, Defender state за
 
 Отдельно проверяются cancellation, permission denied, locked files, reparse points, hard links, sparse/compressed files, ADS, watcher overflow, USN cursor recovery, отключение тома, snapshot round-trip и export atomicity.
 
-Негативные fixtures проверяют stale/out-of-order/duplicate события, file-ID reuse, IPC spoof/replay/version mismatch/helper crash, UAC refusal, delete TOCTOU, malformed и compression-bomb snapshot, CSV formula injection, HTML escaping, corrupt settings, channel saturation/OOM guard и redaction. Ожидаемое поведение во всех security cases — fail closed без изменения файловой системы; при resource exhaustion вкладка сохраняет последний consistent snapshot и предлагает targeted/full rescan.
+Негативные fixtures проверяют stale/out-of-order/duplicate события, targeted-rescan branch fences и cross-boundary moves, file-ID reuse, IPC spoof/replay/version mismatch/helper crash, UAC refusal, delete TOCTOU, malformed и compression-bomb snapshot, CSV formula injection, HTML escaping, corrupt settings, channel saturation/OOM guard и redaction. Lossless-name fixtures включают unpaired UTF-16 surrogates, разные NFC/NFD sequences с одинаковым display и case-sensitive directory names; snapshot round-trip обязан сохранить exact code units. Ожидаемое поведение во всех security cases — fail closed без изменения файловой системы; при resource exhaustion вкладка сохраняет последний consistent snapshot и предлагает targeted/full rescan.
 
 ### 17.3 Destructive tests
 
@@ -402,14 +402,14 @@ Delete result journal находится в `%LOCALAPPDATA%\\Voidspace\\operatio
 
 | Состояние | Допустимые переходы | Данные и watcher |
 |---|---|---|
-| `Queued` | `BaselineActive`, `CancelledPartial`, `Error` | Пустой индекс; watcher создаётся только для `LiveScan` перед baseline |
+| `Queued` | `BaselineActive`, `SnapshotReady`, `CancelledPartial`, `Error` | Пустой индекс; `SnapshotReady` допустим только для `Snapshot`, watcher создаётся только для `LiveScan` перед baseline |
 | `BaselineActive` | `Paused { resume_to: BaselineActive }`, `Reconciling`, `ReadyStatic`, `CancelledPartial`, `Offline`, `Error` | Scan events потоковы; у `LiveScan` watcher буферизует, у `StaticScan` отсутствует |
 | `RescanActive` | `Paused { resume_to: RescanActive }`, `Reconciling`, `ReadyStatic`, `Offline`, `Error` | Старая consistent ветка видна до atomic replacement; watcher существует только у `LiveScan` |
 | `Paused { resume_to }` | сохранённый `resume_to`, `CancelledPartial`, `Offline`, `Error` | Producers scan/rescan приостановлены; live watcher продолжает bounded buffer |
 | `Reconciling` | `Watching`, `RescanActive`, `Offline`, `Error` | Только `LiveScan`: baseline закрыт, buffered deltas воспроизводятся |
 | `Watching` | `RescanActive`, `Offline`, `CancelledPartial`, `Error` | Только `LiveScan`: инкрементальные изменения активны |
 | `ReadyStatic` | `RescanActive`, `CancelledPartial`, `Error` | Terminal-ready для `StaticScan` или для live updates, отключённых до запуска; watcher отсутствует |
-| `SnapshotReady` | close, `Queued` в новой scan-вкладке | Snapshot read-only, никаких scanner/watcher/fileops |
+| `SnapshotReady` | close | Snapshot read-only, никаких scanner/watcher/fileops; команда Scan создаёт отдельную вкладку и не меняет эту state machine |
 | `Offline` | `Reconciling`, `RescanActive`, `CancelledPartial`, `Error` | Только live scope на недоступном device/share; последний snapshot read-only, reconnect проверяет `VolumeId` и cursor |
 | `CancelledPartial` | `Queued` через явный полный Rescan, close | Partial index навигационный/read-only; watcher и workers остановлены |
 | `Error` | `RescanActive`, `Queued`, close | Последний consistent snapshot сохраняется; переход зависит от recoverability |
@@ -427,18 +427,21 @@ Close активной scan-вкладки отменяет её без мода
 ```text
 EventEnvelope {
   schema_version: u16, scan_id: ScanId, generation: u64,
+  branch_epoch: Option<u64>,
   producer: ProducerId, sequence: u64, observed_at_qpc: u64,
   cause_operation: Option<OperationId>, payload: EventPayload
 }
 ```
 
-`generation` увеличивается при каждом новом baseline одного scope. `sequence` строго возрастает для одного producer и generation. Неизвестная версия, чужой `scan_id/generation` или повторный `(producer, sequence)` отвергаются без мутации.
+`generation` увеличивается при каждом новом full baseline одного scope. `branch_epoch` выдаётся coordinator-ом для targeted/privileged rescan и отсутствует у initial baseline/watcher events. `sequence` строго возрастает для одного producer и generation. Неизвестная версия, чужой `scan_id/generation`, неактивный `branch_epoch` или повторный `(producer, sequence)` отвергаются без мутации.
 
-`ScanEvent` имеет варианты `BaselineStarted`, `UpsertNode`, `RemoveNode`, `DirectoryEnumerated` и `BaselineFinished { captured_cursor, root_fingerprint }`, а `NodeError` является отдельным non-mutating diagnostic event. `UpsertNode` содержит parent identity, file identity, normalized name, kind, sizes, timestamps, attributes, reparse metadata и `SourceRevision`. `DirectoryEnumerated { directory_identity, enumeration_epoch, sorted_child_identities, directory_fingerprint }` закрывает одну authoritative enumeration: только после него reducer знает полный child-set этой директории. `NodeError` содержит stable category, OS code, path/identity, `recoverable` и suggested action; ошибка не завершает stream, кроме `FatalSourceLost`.
+`ScanEvent` имеет варианты `BaselineStarted`, `UpsertNode`, `RemoveNode`, `DirectoryEnumerated` и `BaselineFinished { captured_cursor, root_fingerprint }`, а `NodeError` является отдельным non-mutating diagnostic event. `UpsertNode` содержит parent identity, file identity, lossless `WinName`, kind, sizes, timestamps, attributes, reparse metadata и `SourceRevision`. `DirectoryEnumerated { directory_identity, enumeration_epoch, sorted_child_identities, directory_fingerprint }` закрывает одну authoritative enumeration: только после него reducer знает полный child-set этой директории. `NodeError` содержит stable category, OS code, path/identity, `recoverable` и suggested action; ошибка не завершает stream, кроме `FatalSourceLost`.
+
+`WinName` хранит точную последовательность Win32 UTF-16 code units (`Vec<u16>`, без terminal NUL); identity, ordering, path reconstruction и fingerprints используют UTF-16LE bytes без Unicode normalization/case folding. Display/search key создаётся отдельно: валидные scalar values приводятся к NFC + Windows OrdinalIgnoreCase, unpaired surrogate показывается и индексируется как literal escape `\\uD800`–`\\uDFFF`. Display key никогда не преобразуется обратно в path и не участвует в безопасности. `PathBuf/OsString` строятся только из lossless code units.
 
 `SourceRevision = { producer, generation, sequence }` сравнима только внутри одного producer; порядок между baseline, watcher и fileops определяется фазами раздела 22, а не timestamp. Параллельный `UpsertNode`, пришедший раньше parent, хранится в bounded pending-parent map (максимум 65 536); после появления parent он применяется в sequence order. Переполнение, unresolved parent к `BaselineFinished` или конфликт kind/identity дают `Invalidate(minimal known ancestor)`, не создают synthetic parent.
 
-`directory_fingerprint` — BLAKE3 canonical byte stream отсортированных immediate children: `(FileId bytes, normalized UTF-8 name, kind, logical, allocated, last-write UTC, reparse flag)`; ошибка чтения кодируется отдельным stable marker. `root_fingerprint` — тот же recursive aggregate hash для root после закрытия всех `DirectoryEnumerated`. Он обнаруживает расхождения, но не заменяет event replay. Термин `metadata revision` означает `SourceRevision`; отдельного filesystem revision не предполагается.
+`directory_fingerprint` — BLAKE3 canonical byte stream отсортированных immediate children: `(FileId bytes, WinName length + UTF-16LE bytes, kind, logical, allocated, last-write UTC, reparse flag)`; ошибка чтения кодируется отдельным stable marker. `root_fingerprint` — тот же recursive aggregate hash для root после закрытия всех `DirectoryEnumerated`. Он обнаруживает расхождения, но не заменяет event replay. Термин `metadata revision` означает `SourceRevision`; отдельного filesystem revision не предполагается.
 
 `FsDelta` имеет нормализованные варианты `Create`, `Delete`, `ModifyMetadata`, `ModifySize`, `Move { old_parent, new_parent, old_name, new_name }` и `Invalidate { minimal_scope, reason }`. Rename old/new из Win32 объединяются watcher-ом; потерянная половина никогда не угадывается и превращается в `Invalidate(parent)`. USN reason flags могут схлопнуться в один delta на identity в пределах 40 мс, сохраняя последний name/parent и суммируя flags.
 
@@ -454,6 +457,17 @@ EventEnvelope {
 4. После `BaselineFinished` coordinator сверяет root fingerprint и воспроизводит watcher deltas в journal order. Для `ReadDirectoryChangesW`, где нет глобального номера, сохраняется порядок callback batch; конфликт identities/paths ведёт к targeted rescan, а не к предположению.
 5. Только после draining buffer публикуется состояние `Watching`. Новые deltas могут идти в следующий atomic reducer batch.
 6. Optimistic fileop delta получает `OperationId`, captured identity и expected transition. Совпавшее watcher event в течение 2 секунд подтверждает его и дедуплицируется. Несовпадение, timeout или обратное событие помечают минимальный общий ancestor на rescan.
+
+Targeted rescan и `PrivilegedSubtreeScan` используют branch transaction:
+
+1. Coordinator coalesces overlapping requests до минимального общего ancestor, выдаёт monotonic `branch_epoch` и фиксирует branch fence: текущий USN либо watcher callback sequence до начала enumeration.
+2. Watcher router продолжает применять события вне ветки. Любое событие, затрагивающее ветку или пересекающее её границу (move in/out), после fence идёт в отдельный bounded branch buffer; обе стороны cross-boundary move удерживаются до commit.
+3. Scanner/helper строит полную ветку в отдельной shadow arena с тем же `generation` и данным `branch_epoch`. Live index не мутируется scan events этой transaction; `SourceRevision` разных producers сравнивать не требуется.
+4. После `BaselineFinished` coordinator проверяет root identity/fingerprint, атомарно заменяет ветку shadow snapshot-ом и в той же unpublished reducer transaction воспроизводит branch buffer в watcher order. Только затем увеличивает `index_version` один раз и публикует snapshot/DirtySet.
+5. Fileop deltas для этой ветки также буферизуются с `OperationId` и участвуют в обычной deduplication при replay. События вне ветки могут публиковаться параллельно через другие index pages.
+6. Cancel до commit отбрасывает shadow arena и применяет buffered watcher/fileop deltas к старой ветке; если buffer имеет gap, создаётся `Invalidate`. Overflow, смена cursor/VolumeId, root identity mismatch или unresolved cross-boundary move отбрасывают shadow result и повышают scope до ancestor/full rescan по правилам ниже.
+
+Для `StaticScan` watcher/fence/buffer отсутствуют: targeted rescan строит shadow branch и atomically replaces её после fingerprint/identity check. Pause сохраняет shadow и branch buffer; overflow во время pause отменяет transaction и ставит более широкий rescan. Одновременно активна не более одной transaction для любой пары ancestor/descendant; disjoint branches могут выполняться параллельно.
 
 Stale event с меньшим generation отбрасывается. В текущем generation delete создаёт tombstone с identity epoch; последующий create с тем же numeric file ID считается тем же объектом только если creation timestamp, `VolumeId` и ожидаемый parent/name transition согласованы, иначе создаётся новый `NodeId`. Move атомарен для reducer: один node меняет parent/name, а aggregates вычитаются и добавляются один раз.
 
@@ -506,13 +520,13 @@ Preset — JSON `{ version: 1, name, expression, sort, scope, created_utc }`, м
 
 ## 25. Контракт destructive operations
 
-Selection нормализуется до unique canonical roots: descendant удаляется из списка, если уже выбран ancestor. Confirmation строит `ConfirmedManifest` через handle-based recursive enumeration без раскрытия reparse: для каждого entry сохраняются relative normalized name, `VolumeId/FileId`, kind, reparse flag, logical/allocated size, creation/last-write UTC и parent identity. Entries сортируются по `(parent identity, normalized name, file identity)`; BLAKE3 этого canonical byte stream — `directory_fingerprint`. Любая access/I/O ошибка делает manifest неполным и блокирует permanent delete данного root.
+Selection нормализуется до unique canonical roots: descendant удаляется из списка, если уже выбран ancestor. Confirmation строит `ConfirmedManifest` через handle-based recursive enumeration без раскрытия reparse: для каждого entry сохраняются relative lossless `WinName`, `VolumeId/FileId`, kind, reparse flag, logical/allocated size, creation/last-write UTC и parent identity. Entries сортируются по `(parent identity, UTF-16LE name bytes, file identity)`; BLAKE3 этого canonical byte stream — `directory_fingerprint`. Любая access/I/O ошибка делает manifest неполным и блокирует permanent delete данного root.
 
 Непосредственно перед первым destructive call worker снова строит manifest через root handle и требует byte-for-byte identity/metadata equality с подтверждённым manifest; collision BLAKE3 не является trust boundary, сравниваются записи. При расхождении root получает `ChangedSinceConfirmation` без эффекта. Во время удаления каждый manifest entry открывается с `FILE_FLAG_OPEN_REPARSE_POINT`, identity сверяется по полученному handle, и documented `SetFileInformationByHandle(FileDispositionInfoEx)` применяется к этому же handle. Поэтому path swap после проверки не меняет target. Worker удаляет только identities из manifest; новый/unconfirmed child не удаляется и не даст удалить ancestor.
 
 Permanent delete непустого каталога выполняется post-order по manifest. Reparse object — один leaf. Cancellation проверяется между items/directories: завершённые удаления не откатываются, текущий системный вызов заканчивается, остаток получает `Cancelled`. Если новый child появился после preflight, уже удалённые confirmed entries дают partial result, новый child остаётся, root directory не удаляется. Multi-selection возвращает `Succeeded/Failed/Cancelled/ChangedSinceConfirmation/OutcomeUnknown` по каждому root и child errors; общий status — `Complete`, `Partial` или `NoEffect`.
 
-Volume root и mount root всегда запрещены. Exact protected-root set после `GetFinalPathNameByHandle` normalization: `FOLDERID_Windows`, `FOLDERID_System`, `FOLDERID_SystemX86`, `FOLDERID_ProgramFiles`, `FOLDERID_ProgramFilesX86`, `FOLDERID_ProgramFilesCommon`, `FOLDERID_ProgramFilesCommonX86`, `FOLDERID_ProgramData`, `FOLDERID_Public`, `FOLDERID_UserProfiles`, а также directories обоих binaries. Для любого descendant этих roots обязательны elevated helper, повторный ввод полного canonical path каждого selected root и второй danger-confirm. Device namespaces, alternate data path syntax в качестве root, paths с unresolved reparse component и UNC admin shares (`C$`) запрещены для permanent delete v1.
+Volume root и mount root всегда запрещены. Exact protected-descendant set после `GetFinalPathNameByHandle` normalization: `FOLDERID_Windows`, `FOLDERID_System`, `FOLDERID_SystemX86`, `FOLDERID_ProgramFiles`, `FOLDERID_ProgramFilesX86`, `FOLDERID_ProgramFilesCommon`, `FOLDERID_ProgramFilesCommonX86`, `FOLDERID_ProgramData`, `FOLDERID_Public`, а также directories обоих binaries. Для любого descendant этих roots обязательны elevated helper, повторный ввод полного canonical path каждого selected root и второй danger-confirm. Сам `FOLDERID_UserProfiles` запрещён как root операции; descendants другого user SID требуют elevated helper + full-path confirmation, а файлы внутри профиля текущего SID используют обычную policy, чтобы Downloads/Desktop не вызывали UAC. Device namespaces, alternate data path syntax в качестве root, paths с unresolved reparse component и UNC admin shares (`C$`) запрещены для permanent delete v1.
 
 Recycle Bin использует `IFileOperation`, поддерживает multi-selection и системную отмену. Permanent delete не обещает secure erase. Любая ошибка проверки, IPC или identity работает fail-closed. Результат успешной/частичной операции всегда запускает reconciliation родителей; автоматический retry destructive call запрещён.
 
@@ -520,7 +534,7 @@ Recycle Bin использует `IFileOperation`, поддерживает mult
 
 Snapshot v1 использует little-endian integers и fixed header 128 bytes: offsets `0 magic[4]='VDSP'`, `4 schema_version:u16=1`, `6 header_bytes:u16=128`, `8 flags:u32`, `12 frame_count:u32`, `16 node_count:u64`, `24 uncompressed_total:u64`, `32 metadata_offset:u64=128`, `40 metadata_len:u64`, `48 frame_table_offset:u64`, `56 payload_offset:u64`, `64 created_unix_ns:i64`, `72 file_hash:BLAKE3[32]`, `104 reserved[24]=0`. Unknown nonzero reserved/flag bits отклоняются.
 
-Metadata — RFC 8949 deterministic CBOR map с integer keys: `VolumeId`, root, measurement options, class palette, tag definitions/assignments. Глобальные app settings, history и credentials не сохраняются. После metadata идёт frame table из fixed 64-byte entries: `payload_offset:u64`, `compressed_len:u32`, `uncompressed_len:u32`, `first_node:u64`, `node_count:u32`, `flags:u32`, `frame_hash:BLAKE3[32]`. Каждый payload — один zstd frame с deterministic-CBOR array максимум 65 536 canonical node records; strings UTF-8 NFC, map keys integer и sorted, floating-point отсутствует. `frame_hash` покрывает uncompressed node array; `file_hash` покрывает весь файл с обнулённым диапазоном header `72..104`.
+Metadata — RFC 8949 deterministic CBOR map с integer keys: `VolumeId`, lossless root components, measurement options, class palette, tag definitions/assignments. File/root names кодируются CBOR byte strings как `u32 code_unit_count + exact UTF-16LE`; нечётная длина и embedded terminal NUL отклоняются. Пользовательские UI-строки (tag/class/preset names) — valid UTF-8 NFC и хранятся отдельно. Глобальные app settings, history и credentials не сохраняются. После metadata идёт frame table из fixed 64-byte entries: `payload_offset:u64`, `compressed_len:u32`, `uncompressed_len:u32`, `first_node:u64`, `node_count:u32`, `flags:u32`, `frame_hash:BLAKE3[32]`. Каждый payload — один zstd frame с deterministic-CBOR array максимум 65 536 canonical node records; map keys integer и sorted, floating-point отсутствует. `frame_hash` покрывает uncompressed node array; `file_hash` покрывает весь файл с обнулённым диапазоном header `72..104`.
 
 Writer всегда пишет только current schema. В v1 reader принимает только v1: версии 0 нет. Каждый будущий bump обязан добавить ровно именованную deterministic migration `vN-1 -> vN` и frozen golden fixture до расширения compatibility window; более старые/новые версии отклоняются. Migration происходит в памяти и не меняет исходник.
 
@@ -528,7 +542,7 @@ Resource limits по умолчанию: файл ≤4 GiB, uncompressed ≤8 Gi
 
 Save/export пишет `.voidspace-tmp-<nonce>` в каталоге назначения, flushes data и directory metadata, повторно проверяет artifact и заменяет target одним atomic replace там, где файловая система это поддерживает. Cancel/error удаляет temp; существующий target не меняется. На filesystem без atomic replace overwrite существующего target запрещён: UI предлагает новое имя, а create-new + verified rename использует fail-if-exists. Поэтому старый файл никогда не перезаписывается частично.
 
-Export scope — один из `Whole scan`, `Selected subtree`, `Current filtered view`, `Selected items`; profile явно сохраняет scope, ordering и поля. CSV — UTF-8 с BOM, RFC 4180 quoting; значения, начинающиеся с `=`, `+`, `-`, `@`, tab или CR, получают leading apostrophe. JSON использует UTF-8 и numeric byte counts. HTML экранирует текст/атрибуты, не включает inline script и добавляет restrictive CSP. Text template AST имеет максимум 64 KiB source, depth 32 и только field/formatter/conditional nodes; paths и names всегда data, не markup/code.
+Export scope — один из `Whole scan`, `Selected subtree`, `Current filtered view`, `Selected items`; profile явно сохраняет scope, ordering и поля. CSV — UTF-8 с BOM, RFC 4180 quoting; значения, начинающиеся с `=`, `+`, `-`, `@`, tab или CR, получают leading apostrophe. JSON использует UTF-8 и numeric byte counts. Для всех text exports unpaired UTF-16 surrogate сериализуется как видимая ASCII-последовательность `\\uD800`–`\\uDFFF`; lossless round-trip гарантирует snapshot, не report export. HTML экранирует текст/атрибуты, не включает inline script и добавляет restrictive CSP. Text template AST имеет максимум 64 KiB source, depth 32 и только field/formatter/conditional nodes; paths и names всегда data, не markup/code.
 
 ## 27. Release gates
 
@@ -536,7 +550,7 @@ Export scope — один из `Whole scan`, `Selected subtree`, `Current filter
 
 1. **Foundation:** model/index/reducer/layout, synthetic streaming data, рабочая Spectral UI, navigation и benchmark harness; без доступа к реальным файлам.
 2. **Normal Live:** normal scanner, `ReadDirectoryChangesW`, state machine, filters/classes/tags, multi-tab и recovery; read-only файловые действия кроме Open/Explorer/Properties.
-3. **Turbo:** signed elevated helper, authenticated IPC, NTFS baseline/USN, UAC flows и adversarial IPC tests.
+3. **Turbo:** оба бинарника подписаны одним ожидаемым Authenticode publisher и взаимно проверяемы; authenticated IPC, NTFS baseline/USN, UAC flows и adversarial IPC tests.
 4. **Safe Actions:** Recycle Bin, permanent delete, protected-root flow, optimistic reconciliation и VHDX destructive suite.
 5. **Artifacts & Ship:** snapshots, четыре exports, accessibility, diagnostics/redaction, compatibility/performance matrix и подписанный portable package.
 
