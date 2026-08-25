@@ -9,6 +9,11 @@ rust-version.workspace = true
 name = "voidspace"
 path = "src/main.rs"
 
+[[bin]]
+name = "voidspace-smoke"
+path = "src/bin/voidspace-smoke.rs"
+test = false
+
 [dependencies]
 anyhow.workspace = true
 crossbeam-channel.workspace = true

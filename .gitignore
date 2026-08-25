@@ -1,7 +1,9 @@
 .worktrees/
 target/
+dist/
 .shaw/
 STATE.lock
 STATE.yaml.lock
 *.pdb
 *.dmp
+.project-flow/evidence/package-captured.*.log
