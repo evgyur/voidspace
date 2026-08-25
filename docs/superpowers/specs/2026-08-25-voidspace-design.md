@@ -1,7 +1,7 @@
 # Voidspace: дизайн Windows-анализатора дискового пространства
 
 Дата: 2026-08-25  
-Статус: утверждённый дизайн, проходит финальную проверку перед планированием реализации
+Статус: утверждённый дизайн, независимо проверен и готов к планированию реализации
 Рабочее название: Voidspace
 
 ## 1. Контекст
@@ -358,6 +358,7 @@ Benchmark protocol: release build, plugged-in power profile, Defender state за
 - template parser без выполнения кода;
 - treemap: отсутствие пересечений, containment, неотрицательная площадь, детерминированность;
 - reducer для произвольных последовательностей create/delete/modify/rename/move;
+- property/integration invariant: при одновременных disjoint rescans и move `A -> B` каждый `(producer, sequence)` принадлежит ровно одной commit transaction;
 - canonical path и protected-root policy.
 
 ### 17.2 Integration tests
