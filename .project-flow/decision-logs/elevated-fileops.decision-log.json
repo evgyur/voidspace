@@ -1,0 +1,11 @@
+{
+  "schema": "project_flow.decision_log.v1",
+  "task_id": "elevated-fileops",
+  "decisions": [
+    {
+      "decision": "Ship Turbo as an explicitly labeled UAC-elevated privileged traversal fallback instead of claiming an unimplemented USN journal accelerator.",
+      "reason": "A transparent, tested fallback preserves correctness and protected-file access; reporting USN mode without FSCTL enumeration would be a false completion claim.",
+      "impact": "Turbo/F5 relaunches Voidspace through UAC with the selected scope and shows TURBO FALLBACK. The typed helper protocol and embedded requireAdministrator helper remain packaged for future USN acceleration."
+    }
+  ]
+}

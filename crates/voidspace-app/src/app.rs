@@ -3,8 +3,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crossbeam_channel::{Receiver, bounded};
+use crossbeam_channel::{Receiver, Sender, bounded};
 use eframe::egui;
+use voidspace_fileops::{
+    CancellationToken, ConfirmableOperation, OperationDraft, OperationKind, OperationReport,
+    confirm, execute, prepare, reveal_in_explorer,
+};
 use voidspace_filter::{Expr, parse};
 use voidspace_index::{Index, IndexSnapshot};
 use voidspace_layout::{LayoutSnapshot, Rect as LayoutRect, SizeMode, ViewState, layout};
@@ -51,6 +55,17 @@ struct ScanTab {
     show_other_for: Option<(NodeId, u32)>,
 }
 
+enum InspectorAction {
+    Reveal(PathBuf),
+    Recycle(PathBuf),
+    Permanent(PathBuf),
+}
+
+struct FileOpDialog {
+    operation: ConfirmableOperation,
+    phrase: String,
+}
+
 pub struct VoidspaceApp {
     tabs: Vec<ScanTab>,
     active_tab: usize,
@@ -61,13 +76,19 @@ pub struct VoidspaceApp {
     filter_error: Option<String>,
     details_drawer: bool,
     toast: Option<String>,
+    fileop_dialog: Option<FileOpDialog>,
+    fileop_tx: Sender<Result<OperationReport, String>>,
+    fileop_rx: Receiver<Result<OperationReport, String>>,
+    fileop_running: bool,
+    turbo_session: bool,
 }
 
 impl VoidspaceApp {
     pub fn new(context: &eframe::CreationContext<'_>) -> Self {
         theme::install(&context.egui_ctx);
         let default_scope = std::env::var("USERPROFILE").unwrap_or_else(|_| "C:\\".into());
-        Self {
+        let (fileop_tx, fileop_rx) = bounded(4);
+        let mut app = Self {
             tabs: Vec::new(),
             active_tab: 0,
             next_scan_id: 1,
@@ -77,7 +98,20 @@ impl VoidspaceApp {
             filter_error: None,
             details_drawer: false,
             toast: None,
+            fileop_dialog: None,
+            fileop_tx,
+            fileop_rx,
+            fileop_running: false,
+            turbo_session: std::env::args().any(|argument| argument == "--turbo"),
+        };
+        let arguments: Vec<String> = std::env::args().collect();
+        if let Some(index) = arguments.iter().position(|argument| argument == "--scan")
+            && let Some(scope) = arguments.get(index + 1)
+        {
+            app.scope_text = scope.clone();
+            app.start_scan(PathBuf::from(scope));
         }
+        app
     }
 
     fn start_scan(&mut self, root_path: PathBuf) {
@@ -148,6 +182,26 @@ impl VoidspaceApp {
     }
 
     fn update_workers(&mut self, context: &egui::Context) {
+        while let Ok(result) = self.fileop_rx.try_recv() {
+            self.fileop_running = false;
+            match result {
+                Ok(report) if report.failed.is_empty() => {
+                    self.toast = Some(format!("Removed {} item(s)", report.deleted.len()));
+                    if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                        tab.pending_rescan = true;
+                        tab.last_watch_event = Some(Instant::now());
+                    }
+                }
+                Ok(report) => {
+                    self.toast = Some(format!(
+                        "Removed {}; {} failed",
+                        report.deleted.len(),
+                        report.failed.len()
+                    ));
+                }
+                Err(error) => self.toast = Some(error),
+            }
+        }
         let mut restart = Vec::new();
         for (tab_index, tab) in self.tabs.iter_mut().enumerate() {
             while let Ok(signal) = tab.watcher_events.try_recv() {
@@ -271,6 +325,18 @@ impl VoidspaceApp {
                     {
                         self.start_scan(PathBuf::from(self.scope_text.trim()));
                     }
+                    if ui
+                        .add_sized(
+                            [112.0, 36.0],
+                            egui::Button::new(
+                                egui::RichText::new("TURBO / F5").strong().color(theme::BG),
+                            )
+                            .fill(theme::LIME),
+                        )
+                        .clicked()
+                    {
+                        self.launch_turbo();
+                    }
                     ui.separator();
                     let filter_response = (ui.available_width() >= 140.0).then(|| {
                         ui.add_sized(
@@ -387,7 +453,8 @@ impl VoidspaceApp {
             });
     }
 
-    fn inspector(ui: &mut egui::Ui, tab: &mut ScanTab) {
+    fn inspector(ui: &mut egui::Ui, tab: &mut ScanTab) -> Option<InspectorAction> {
+        let mut action = None;
         ui.label(
             egui::RichText::new("OBJECT / INSPECTOR")
                 .monospace()
@@ -424,6 +491,30 @@ impl VoidspaceApp {
             {
                 tab.view_root = previous;
             }
+            ui.add_space(10.0);
+            ui.separator();
+            ui.label(
+                egui::RichText::new("FILE ACTIONS")
+                    .monospace()
+                    .small()
+                    .color(theme::MUTED),
+            );
+            let selected_path = path_for_node(tab, selected);
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("SHOW IN EXPLORER").clicked() {
+                    action = Some(InspectorAction::Reveal(selected_path.clone()));
+                }
+                if selected != tab.snapshot.root && ui.button("RECYCLE").clicked() {
+                    action = Some(InspectorAction::Recycle(selected_path.clone()));
+                }
+                if selected != tab.snapshot.root
+                    && ui
+                        .add(egui::Button::new("DELETE FOREVER").fill(theme::ORANGE))
+                        .clicked()
+                {
+                    action = Some(InspectorAction::Permanent(selected_path));
+                }
+            });
             ui.add_space(10.0);
             if let Some((other_parent, other_count)) = tab.show_other_for
                 && other_parent == selected
@@ -464,6 +555,7 @@ impl VoidspaceApp {
                 ui.label(egui::RichText::new(error).small().color(theme::MUTED));
             }
         }
+        action
     }
 
     fn workspace(&mut self, root_ui: &mut egui::Ui) {
@@ -493,11 +585,14 @@ impl VoidspaceApp {
         let context = root_ui.ctx().clone();
         let mode = workspace_mode(root_ui.max_rect().width());
         let tab = &mut self.tabs[self.active_tab];
+        let mut inspector_action = None;
         if mode == WorkspaceMode::Docked {
             egui::Panel::right("inspector")
                 .exact_size(320.0)
                 .frame(egui::Frame::new().fill(theme::SURFACE).inner_margin(16.0))
-                .show(root_ui, |ui| Self::inspector(ui, tab));
+                .show(root_ui, |ui| {
+                    inspector_action = Self::inspector(ui, tab);
+                });
         }
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(theme::BG).inner_margin(8.0))
@@ -554,8 +649,138 @@ impl VoidspaceApp {
                 .resizable(false)
                 .anchor(egui::Align2::RIGHT_TOP, [-10.0, 104.0])
                 .fixed_size([340.0, 460.0])
-                .show(&context, |ui| Self::inspector(ui, tab));
+                .show(&context, |ui| {
+                    inspector_action = Self::inspector(ui, tab);
+                });
             self.details_drawer = open;
+        }
+        if let Some(action) = inspector_action {
+            self.handle_inspector_action(action);
+        }
+    }
+
+    fn handle_inspector_action(&mut self, action: InspectorAction) {
+        match action {
+            InspectorAction::Reveal(path) => {
+                if let Err(error) = reveal_in_explorer(&path) {
+                    self.toast = Some(error.to_string());
+                }
+            }
+            InspectorAction::Recycle(path) => self.prepare_fileop(path, OperationKind::Recycle),
+            InspectorAction::Permanent(path) => {
+                self.prepare_fileop(path, OperationKind::Permanent);
+            }
+        }
+    }
+
+    fn prepare_fileop(&mut self, path: PathBuf, kind: OperationKind) {
+        match prepare(OperationDraft {
+            kind,
+            paths: vec![path],
+        }) {
+            Ok(operation) => {
+                self.fileop_dialog = Some(FileOpDialog {
+                    operation,
+                    phrase: String::new(),
+                });
+            }
+            Err(error) => self.toast = Some(error.to_string()),
+        }
+    }
+
+    fn fileop_dialog(&mut self, context: &egui::Context) {
+        let Some(dialog) = &mut self.fileop_dialog else {
+            return;
+        };
+        let permanent = dialog.operation.kind == OperationKind::Permanent;
+        let mut execute_now = false;
+        let mut cancel = false;
+        egui::Window::new(if permanent {
+            "DELETE FOREVER"
+        } else {
+            "MOVE TO RECYCLE BIN"
+        })
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(context, |ui| {
+            ui.set_min_width(460.0);
+            ui.label(format!(
+                "{} object(s) · {}",
+                dialog.operation.manifest.len(),
+                treemap::format_bytes(dialog.operation.total_bytes)
+            ));
+            ui.label(
+                egui::RichText::new(dialog.operation.roots[0].display().to_string())
+                    .small()
+                    .color(theme::MUTED),
+            );
+            if permanent {
+                ui.add_space(12.0);
+                ui.label(
+                    egui::RichText::new("This cannot be undone. Type DELETE to continue.")
+                        .strong()
+                        .color(theme::ORANGE),
+                );
+                ui.text_edit_singleline(&mut dialog.phrase);
+            }
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                if ui.button("CANCEL").clicked() {
+                    cancel = true;
+                }
+                if ui
+                    .add_enabled(
+                        !permanent || dialog.phrase == "DELETE",
+                        egui::Button::new(if permanent {
+                            "DELETE FOREVER"
+                        } else {
+                            "RECYCLE"
+                        })
+                        .fill(if permanent {
+                            theme::ORANGE
+                        } else {
+                            theme::LIME
+                        }),
+                    )
+                    .clicked()
+                {
+                    execute_now = true;
+                }
+            });
+        });
+        if cancel {
+            self.fileop_dialog = None;
+        } else if execute_now && let Some(dialog) = self.fileop_dialog.take() {
+            let phrase = if permanent { "DELETE" } else { "" };
+            match confirm(dialog.operation, phrase) {
+                Ok(operation) => {
+                    let sink = self.fileop_tx.clone();
+                    self.fileop_running = true;
+                    std::thread::spawn(move || {
+                        let result = execute(operation, None, &CancellationToken::default())
+                            .map_err(|error| error.to_string());
+                        let _ = sink.send(result);
+                    });
+                }
+                Err(error) => self.toast = Some(error.to_string()),
+            }
+        }
+    }
+
+    fn launch_turbo(&mut self) {
+        match std::env::current_exe() {
+            Ok(executable) => {
+                let scope = self.scope_text.replace('"', "");
+                let arguments = format!("--turbo --scan \"{scope}\"");
+                match voidspace_elevated::launch_elevated(&executable, &arguments) {
+                    Ok(()) => {
+                        self.toast = Some("Launching privileged Turbo traversal through UAC".into())
+                    }
+                    Err(error) => self.toast = Some(format!("Turbo launch failed: {error}")),
+                }
+            }
+            Err(error) => self.toast = Some(format!("Cannot locate Voidspace: {error}")),
         }
     }
 
@@ -602,6 +827,18 @@ impl VoidspaceApp {
                         ui.separator();
                         ui.label(egui::RichText::new(error).color(theme::ORANGE));
                     }
+                    if self.fileop_running {
+                        ui.separator();
+                        ui.label(egui::RichText::new("FILE OPERATION").color(theme::MAGENTA));
+                    }
+                    if self.turbo_session {
+                        ui.separator();
+                        ui.label(
+                            egui::RichText::new("TURBO FALLBACK")
+                                .strong()
+                                .color(theme::LIME),
+                        );
+                    }
                     if let Some(toast) = &self.toast {
                         ui.separator();
                         ui.label(egui::RichText::new(toast).color(theme::ORANGE));
@@ -613,6 +850,9 @@ impl VoidspaceApp {
 
 impl eframe::App for VoidspaceApp {
     fn logic(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
+        if context.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::F5)) {
+            self.launch_turbo();
+        }
         self.update_workers(context);
     }
 
@@ -622,7 +862,30 @@ impl eframe::App for VoidspaceApp {
         self.scan_toolbar(ui);
         self.status_bar(ui);
         self.workspace(ui);
+        self.fileop_dialog(ui.ctx());
     }
+}
+
+fn path_for_node(tab: &ScanTab, node_id: NodeId) -> PathBuf {
+    let mut components = Vec::new();
+    let mut current = Some(node_id);
+    while let Some(id) = current {
+        let Some(node) = tab.snapshot.node(id) else {
+            break;
+        };
+        if id != tab.snapshot.root {
+            #[cfg(windows)]
+            components.push(node.name.to_os_string());
+            #[cfg(not(windows))]
+            components.push(std::ffi::OsString::from(node.name.display_escaped()));
+        }
+        current = node.parent;
+    }
+    let mut path = tab.root_path.clone();
+    for component in components.into_iter().rev() {
+        path.push(component);
+    }
+    path
 }
 
 fn empty_layout(root: NodeId) -> LayoutSnapshot {

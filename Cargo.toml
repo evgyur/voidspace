@@ -29,6 +29,7 @@ tempfile = "3.21"
 thiserror = "2.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+trash = "5.2.6"
 windows = "0.62.2"
 zstd = "0.13"
 

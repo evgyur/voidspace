@@ -20,6 +20,8 @@ serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 voidspace-filter = { path = "../voidspace-filter" }
+voidspace-fileops = { path = "../voidspace-fileops" }
+voidspace-elevated = { path = "../voidspace-elevated" }
 voidspace-index = { path = "../voidspace-index" }
 voidspace-layout = { path = "../voidspace-layout" }
 voidspace-model = { path = "../voidspace-model" }
@@ -28,4 +30,3 @@ voidspace-watch = { path = "../voidspace-watch" }
 
 [dev-dependencies]
 tempfile.workspace = true
-
