@@ -529,17 +529,28 @@ fn aggregate_is_still_valid(
     })
 }
 
-pub fn show(
-    ui: &mut Ui,
-    snapshot: &IndexSnapshot,
-    base_layout: &LayoutSnapshot,
-    selected: Option<NodeId>,
-    filter: Option<&Expr>,
-    preview: PreviewState,
-    typography: &theme::Typography,
-    base_metrics: &CandidateMetrics,
-    open_aggregate: Option<&AggregateSelection>,
-) -> TreemapResponse {
+pub(crate) struct ShowRequest<'a> {
+    pub snapshot: &'a IndexSnapshot,
+    pub base_layout: &'a LayoutSnapshot,
+    pub selected: Option<NodeId>,
+    pub filter: Option<&'a Expr>,
+    pub preview: PreviewState,
+    pub typography: &'a theme::Typography,
+    pub base_metrics: &'a CandidateMetrics,
+    pub open_aggregate: Option<&'a AggregateSelection>,
+}
+
+pub fn show(ui: &mut Ui, request: ShowRequest<'_>) -> TreemapResponse {
+    let ShowRequest {
+        snapshot,
+        base_layout,
+        selected,
+        filter,
+        preview,
+        typography,
+        base_metrics,
+        open_aggregate,
+    } = request;
     let desired = ui.available_size();
     let (response, painter) = ui.allocate_painter(desired, Sense::click());
     let bounds = response.rect;
@@ -1178,7 +1189,10 @@ mod aggregate_validity_tests {
             depth: 1,
             members: vec![NodeId(9), NodeId(10)],
         };
-        assert!(aggregate_is_still_valid(Some(&open), &[exact.clone()]));
+        assert!(aggregate_is_still_valid(
+            Some(&open),
+            std::slice::from_ref(&exact)
+        ));
         assert!(!aggregate_is_still_valid(
             Some(&open),
             &[RenderedAggregate {

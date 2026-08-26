@@ -75,33 +75,32 @@ pub struct AggregateGroup {
 }
 
 pub fn layout(snapshot: &IndexSnapshot, view: &ViewState, _dirty: &DirtySet) -> LayoutSnapshot {
-    let mut output = vec![LayoutNode {
-        node_id: view.root,
-        parent_id: snapshot.node(view.root).and_then(|node| node.parent),
-        rect: view.bounds,
-        depth: 0,
-        aggregated: false,
-        aggregate_count: 0,
-        aggregate_size: 0,
-    }];
-    let mut aggregates = Vec::new();
-    let mut real_budget = view.max_rectangles;
-    layout_children(
-        snapshot,
-        view,
-        view.root,
-        view.bounds,
-        1,
-        &mut real_budget,
-        &mut output,
-        &mut aggregates,
-    );
+    let mut collector = LayoutCollector {
+        real_budget: view.max_rectangles,
+        nodes: vec![LayoutNode {
+            node_id: view.root,
+            parent_id: snapshot.node(view.root).and_then(|node| node.parent),
+            rect: view.bounds,
+            depth: 0,
+            aggregated: false,
+            aggregate_count: 0,
+            aggregate_size: 0,
+        }],
+        aggregates: Vec::new(),
+    };
+    layout_children(snapshot, view, view.root, view.bounds, 1, &mut collector);
     LayoutSnapshot {
         index_version: snapshot.index_version,
         root: view.root,
-        nodes: output,
-        aggregates,
+        nodes: collector.nodes,
+        aggregates: collector.aggregates,
     }
+}
+
+struct LayoutCollector {
+    real_budget: usize,
+    nodes: Vec<LayoutNode>,
+    aggregates: Vec<AggregateGroup>,
 }
 
 fn layout_children(
@@ -110,9 +109,7 @@ fn layout_children(
     parent: NodeId,
     bounds: Rect,
     depth: u8,
-    real_budget: &mut usize,
-    output: &mut Vec<LayoutNode>,
-    aggregates: &mut Vec<AggregateGroup>,
+    collector: &mut LayoutCollector,
 ) {
     if depth > view.max_depth {
         return;
@@ -152,7 +149,7 @@ fn layout_children(
         bounds,
         view.min_label,
         view.min_area,
-        *real_budget,
+        collector.real_budget,
     );
     let keep_count = partition.aggregate_start;
     let kept = children
@@ -160,11 +157,10 @@ fn layout_children(
         .take(keep_count)
         .map(|(id, _)| *id)
         .collect::<Vec<_>>();
-    *real_budget = real_budget.saturating_sub(keep_count);
-    let mut descendant_budget = *real_budget;
+    collector.real_budget = collector.real_budget.saturating_sub(keep_count);
 
     for (node_id, rect) in kept.into_iter().zip(partition.rectangles.iter().copied()) {
-        output.push(LayoutNode {
+        collector.nodes.push(LayoutNode {
             node_id,
             parent_id: Some(parent),
             rect,
@@ -183,32 +179,22 @@ fn layout_children(
         } else {
             rect
         };
-        layout_children(
-            snapshot,
-            view,
-            node_id,
-            child_bounds,
-            depth + 1,
-            &mut descendant_budget,
-            output,
-            aggregates,
-        );
+        layout_children(snapshot, view, node_id, child_bounds, depth + 1, collector);
     }
-    *real_budget = descendant_budget;
 
     if partition.aggregate_count > 0 {
         let member_ids = children[partition.aggregate_start..]
             .iter()
             .map(|(node_id, _)| *node_id)
             .collect::<Vec<_>>();
-        aggregates.push(AggregateGroup {
+        collector.aggregates.push(AggregateGroup {
             parent_id: parent,
             depth,
             member_ids: member_ids.clone(),
             size: partition.aggregate_size,
         });
         if let Some(rect) = partition.aggregate_rect {
-            output.push(LayoutNode {
+            collector.nodes.push(LayoutNode {
                 node_id: parent,
                 parent_id: Some(parent),
                 rect,

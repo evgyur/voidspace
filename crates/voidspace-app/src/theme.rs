@@ -127,7 +127,7 @@ fn validate(bytes: &'static [u8], expected_sha: &str, weights: &[f32]) -> Result
     let axis = data
         .variation_axes()
         .into_iter()
-        .find(|axis| axis.tag.to_string() == "wght")
+        .find(|axis| axis.tag.to_be_bytes() == *b"wght")
         .ok_or_else(|| "missing wght axis".to_owned())?;
     if weights.iter().any(|weight| !axis.range.contains(*weight)) {
         return Err("wght range mismatch".into());

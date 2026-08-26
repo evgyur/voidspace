@@ -1049,14 +1049,16 @@ impl VoidspaceApp {
                 };
                 let response = treemap::show(
                     ui,
-                    &tab.snapshot,
-                    &tab.layout,
-                    tab.treemap_state.selected,
-                    self.filter.as_ref(),
-                    preview,
-                    &self.typography,
-                    &metrics,
-                    tab.treemap_state.aggregate.as_ref(),
+                    treemap::ShowRequest {
+                        snapshot: &tab.snapshot,
+                        base_layout: &tab.layout,
+                        selected: tab.treemap_state.selected,
+                        filter: self.filter.as_ref(),
+                        preview,
+                        typography: &self.typography,
+                        base_metrics: &metrics,
+                        open_aggregate: tab.treemap_state.aggregate.as_ref(),
+                    },
                 );
                 if !response.aggregate_still_valid {
                     tab.treemap_state.aggregate = None;
