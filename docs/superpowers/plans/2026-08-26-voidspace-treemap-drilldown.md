@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make one click visibly pin a directory’s children inside its tile, double click zoom into that directory, provide direct Back/breadcrumb navigation, and guarantee a size label on every visible rectangle.
+**Goal:** Make one click visibly pin a directory’s children inside its tile, double click zoom into that directory, provide direct Back/breadcrumb navigation, guarantee a size label on every visible rectangle, and keep a Desktop shortcut pointed at the latest locally installed release.
 
 **Architecture:** `voidspace-layout` will emit only real rectangles that meet a UI-supplied outer label footprint and will expose exact deterministic `OTHER` membership. A new app-local state module will own canonical root-to-view navigation and pure transition reduction. `treemap.rs` will produce one typed action per activation and render measured three-tier labels; `app.rs` will apply actions and render the navigation strip.
 
@@ -20,6 +20,8 @@
 - Modify `crates/voidspace-app/src/app.rs`: `ScanTab` state migration, action application, label-footprint calculation, breadcrumb/Back/Alt+Left integration, exact `OTHER` inspector membership.
 - Modify `crates/voidspace-app/tests/ui_state.rs`: pin/zoom/back/breadcrumb/live-repair state tests.
 - Modify `README.md`: document click, double-click, keyboard, and Back behavior.
+- Create `scripts/install-local.ps1`: atomically refresh a stable per-user install and recreate the Desktop shortcut.
+- Modify `scripts/package.ps1`: install the exact packaged candidate after build/smoke/package success.
 
 ### Task 1: Make layout preserve labeled rectangles and exact `OTHER` membership
 
@@ -1293,10 +1295,88 @@ git commit -m "docs: explain treemap drill-down controls"
 ### Task 7: Package and manually verify the exact release candidate
 
 **Files:**
+- Create: `scripts/install-local.ps1`
+- Modify: `scripts/package.ps1`
 - Generated: `dist/Voidspace-0.1.0-windows-x64/voidspace.exe`
 - Generated: `dist/Voidspace-0.1.0-windows-x64.zip`
+- Generated: `%LOCALAPPDATA%\Voidspace\voidspace.exe`
+- Generated: `%USERPROFILE%\Desktop\Voidspace.lnk`
 
-- [ ] **Step 1: Close only the packaged Voidspace process if it locks the release directory**
+- [ ] **Step 1: Add a stable per-user install and Desktop shortcut updater**
+
+Create `scripts/install-local.ps1` with a mandatory `SourceDir`. Resolve and validate that source, require `voidspace.exe` and `voidspace-elevated.exe`, and install into the fixed path `%LOCALAPPDATA%\Voidspace`. Stop only running Voidspace processes whose resolved `ExecutablePath` equals one of those two fixed installed executables; never stop by process name alone.
+
+Copy each candidate to a same-directory `.new` file and atomically replace/move it into place. Recreate `%USERPROFILE%\Desktop\Voidspace.lnk` with Windows Script Host so its target and working directory are independent of this repository/worktree:
+
+```powershell
+param([Parameter(Mandatory)][string]$SourceDir)
+$ErrorActionPreference = 'Stop'
+
+$source = (Resolve-Path -LiteralPath $SourceDir).Path
+$installDir = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Voidspace'
+$installExe = Join-Path $installDir 'voidspace.exe'
+$installedExecutables = @($installExe, (Join-Path $installDir 'voidspace-elevated.exe')) |
+    ForEach-Object { [IO.Path]::GetFullPath($_) }
+$desktop = [Environment]::GetFolderPath('Desktop')
+$shortcutPath = Join-Path $desktop 'Voidspace.lnk'
+
+$running = Get-CimInstance Win32_Process | Where-Object {
+    if (-not $_.ExecutablePath) { return $false }
+    $processPath = [IO.Path]::GetFullPath($_.ExecutablePath)
+    return $installedExecutables -contains $processPath
+}
+$running | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+
+New-Item -ItemType Directory -Force -Path $installDir | Out-Null
+foreach ($name in @('voidspace.exe', 'voidspace-elevated.exe', 'README.md', 'LICENSE', 'SHA256SUMS.txt')) {
+    $from = Join-Path $source $name
+    if (-not (Test-Path -LiteralPath $from -PathType Leaf)) { throw "Missing packaged file: $name" }
+    $to = Join-Path $installDir $name
+    $next = "$to.new"
+    Copy-Item -LiteralPath $from -Destination $next -Force
+    if (Test-Path -LiteralPath $to) {
+        [IO.File]::Replace($next, $to, $null)
+    } else {
+        Move-Item -LiteralPath $next -Destination $to
+    }
+}
+
+$shell = New-Object -ComObject WScript.Shell
+$shortcut = $shell.CreateShortcut($shortcutPath)
+$shortcut.TargetPath = $installExe
+$shortcut.WorkingDirectory = $installDir
+$shortcut.IconLocation = "$installExe,0"
+$shortcut.Save()
+```
+
+Read the shortcut back through the same COM API, compare its normalized `TargetPath`/`WorkingDirectory`, compare installed and packaged `voidspace.exe` SHA-256 values, then emit:
+
+```text
+VOIDSPACE_DESKTOP_OK C:\Users\user\Desktop\Voidspace.lnk C:\Users\user\AppData\Local\Voidspace\voidspace.exe <sha256>
+```
+
+At the end of `scripts/package.ps1`, invoke `install-local.ps1 -SourceDir $stage`; fail the package command if installation or read-back verification fails. This makes every successful local package run refresh the same Desktop entry to the exact candidate that passed formatting, Clippy, tests, release build, and smoke.
+
+- [ ] **Step 2: Parse-check the PowerShell and commit the installer hook**
+
+Run:
+
+```powershell
+[void][scriptblock]::Create((Get-Content -Raw -LiteralPath '.\scripts\install-local.ps1'))
+[void][scriptblock]::Create((Get-Content -Raw -LiteralPath '.\scripts\package.ps1'))
+git diff --check
+```
+
+Expected: both scripts parse without exception and the diff has no whitespace errors.
+
+Commit:
+
+```powershell
+git add scripts/install-local.ps1 scripts/package.ps1
+git commit -m "build: keep desktop shortcut on latest release"
+```
+
+- [ ] **Step 3: Close only worktree candidates that can lock build/package output**
 
 Run the existing exact-path process check before packaging:
 
@@ -1310,9 +1390,9 @@ $matches = Get-CimInstance Win32_Process -Filter "Name='voidspace.exe'" |
 $matches | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
 ```
 
-Expected: only an exact packaged or stable release candidate is stopped; other processes are untouched.
+Expected: only exact worktree build/package candidates are stopped; other processes are untouched. The installer handles only exact fixed-install paths later.
 
-- [ ] **Step 2: Run the full package pipeline**
+- [ ] **Step 4: Run the full package and local-install pipeline**
 
 Run:
 
@@ -1320,37 +1400,63 @@ Run:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\package.ps1
 ```
 
-Expected output contains both:
+Expected output contains all three markers:
 
 ```text
 VOIDSPACE_SMOKE_OK
+VOIDSPACE_DESKTOP_OK C:\Users\user\Desktop\Voidspace.lnk C:\Users\user\AppData\Local\Voidspace\voidspace.exe <sha256>
 VOIDSPACE_PACKAGE_OK ...\Voidspace-0.1.0-windows-x64.zip <sha256>
 ```
 
-- [ ] **Step 3: Verify the packaged UI against both observed cases**
+- [ ] **Step 5: Verify the installed executable and Desktop shortcut are the exact candidate**
 
-Launch the exact packaged `voidspace.exe`, confirm UAC once, scan the volume containing the observed folders, and verify:
+Run:
+
+```powershell
+$stageExe = (Resolve-Path '.\dist\Voidspace-0.1.0-windows-x64\voidspace.exe').Path
+$installExe = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Voidspace\voidspace.exe'
+$shortcutPath = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Voidspace.lnk'
+$shell = New-Object -ComObject WScript.Shell
+$shortcut = $shell.CreateShortcut($shortcutPath)
+if ([IO.Path]::GetFullPath($shortcut.TargetPath) -ne [IO.Path]::GetFullPath($installExe)) { throw 'Desktop shortcut target mismatch' }
+if ([IO.Path]::GetFullPath($shortcut.WorkingDirectory) -ne [IO.Path]::GetFullPath((Split-Path $installExe))) { throw 'Desktop shortcut working directory mismatch' }
+if ((Get-FileHash $stageExe).Hash -ne (Get-FileHash $installExe).Hash) { throw 'Installed executable hash mismatch' }
+[pscustomobject]@{
+    Shortcut = $shortcutPath
+    Target = $shortcut.TargetPath
+    WorkingDirectory = $shortcut.WorkingDirectory
+    Sha256 = (Get-FileHash $installExe).Hash.ToLowerInvariant()
+} | Format-List
+```
+
+Expected: the shortcut targets `%LOCALAPPDATA%\Voidspace\voidspace.exe`, its working directory is `%LOCALAPPDATA%\Voidspace`, and installed/staged hashes are identical.
+
+- [ ] **Step 6: Verify the installed UI against both observed cases**
+
+Launch `Voidspace.lnk` from the Desktop (not a repo path), confirm UAC once, scan the volume containing the observed folders, and verify:
 
 1. `Traum_v2.31`: hover previews children; one click shows persistent lime `PINNED` while orange selection remains distinct; double click fills the treemap canvas; `← BACK` returns to `books (FLIBUSTA)`.
 2. Nested child: one click preserves the enclosing pin; double click builds a breadcrumb containing the skipped real parent; Back returns to that parent.
 3. Google Drive area: every visible rectangle contains a normal or compact size; no blank micro-rectangles remain; their bytes/count appear in exact `OTHER` details.
 4. Resize through widths above and below 900 px; labels do not overlap, breadcrumb stays visible, inspector/drawer still works.
 5. Click the orange `TURBO ACTIVE` indicator; process/window count remains one.
+6. Close and reopen the app from the same Desktop shortcut; Windows starts the installed executable whose SHA-256 was verified above.
 
-- [ ] **Step 4: Capture release evidence and final commit status**
+- [ ] **Step 7: Capture release evidence and final commit status**
 
 Run:
 
 ```powershell
 git status --short
-git log -7 --oneline
+git log -8 --oneline
 (Get-FileHash -Algorithm SHA256 '.\dist\Voidspace-0.1.0-windows-x64.zip').Hash.ToLowerInvariant()
+(Get-FileHash -Algorithm SHA256 (Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Voidspace\voidspace.exe')).Hash.ToLowerInvariant()
 ```
 
-Expected: source work is committed; only pre-existing `artifacts/` is untracked; the printed SHA-256 matches `VOIDSPACE_PACKAGE_OK`.
+Expected: source work is committed; only pre-existing `artifacts/` is untracked; the archive SHA-256 matches `VOIDSPACE_PACKAGE_OK`, and the installed executable SHA-256 matches both the staged candidate and `VOIDSPACE_DESKTOP_OK`.
 
 ## Plan self-review
 
-- Spec coverage: tasks cover hover/pin, cross-frame double-click rollback, nested direct zoom, canonical ancestry, Back/breadcrumb/Alt+Left, exact aggregate membership, saturating conservation, label footprint including suffix unit boundaries, all three label tiers, accessibility overlays, live repair, docs, package, and observed-case manual verification.
+- Spec coverage: tasks cover hover/pin, cross-frame double-click rollback, nested direct zoom, canonical ancestry, Back/breadcrumb/Alt+Left, exact aggregate membership, saturating conservation, label footprint including suffix unit boundaries, all three label tiers, accessibility overlays, live repair, docs, package, stable per-user installation, verified Desktop shortcut refresh, and observed-case manual verification.
 - Placeholder scan: the plan contains no unresolved markers, deferred implementation, or generic error-handling step; each source change has an explicit type/function/transition contract.
 - Type consistency: `TreemapAction`, `AggregateSelection`, `ViewPath`, `TreemapState`, `LabelFootprint`, and `AggregateGroup` retain the same names and roles across all tasks.
