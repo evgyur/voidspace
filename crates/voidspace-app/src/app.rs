@@ -893,6 +893,7 @@ impl VoidspaceApp {
                         size_mode: SizeMode::Allocated,
                         max_depth: 1,
                         min_area: 196.0,
+                        min_label: voidspace_layout::LabelFootprint::new(54.0, 22.0),
                         max_rectangles: 1024,
                     },
                     &DirtySet::default(),
@@ -1349,6 +1350,7 @@ fn empty_layout(root: NodeId) -> LayoutSnapshot {
         index_version: 0,
         root,
         nodes: Vec::new(),
+        aggregates: Vec::new(),
     }
 }
 
