@@ -11,7 +11,12 @@ if (-not (Test-Path -LiteralPath $source -PathType Container)) {
 }
 $installDir = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Voidspace'
 $installExe = Join-Path $installDir 'voidspace.exe'
-$installedExecutables = @($installExe, (Join-Path $installDir 'voidspace-elevated.exe')) |
+$installedExecutables = @(
+    $installExe,
+    (Join-Path $installDir 'voidspace-elevated.exe'),
+    "$installExe.old",
+    "$(Join-Path $installDir 'voidspace-elevated.exe').old"
+) |
     ForEach-Object { [IO.Path]::GetFullPath($_) }
 $desktop = [Environment]::GetFolderPath('Desktop')
 $shortcutPath = Join-Path $desktop 'Voidspace.lnk'
