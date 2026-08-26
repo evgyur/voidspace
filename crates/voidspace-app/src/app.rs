@@ -17,7 +17,11 @@ use voidspace_model::{DirtySet, EventEnvelope, EventPayload, NodeId};
 use voidspace_scan::{ScanHandle, ScanRequest, describe_root, start};
 use voidspace_watch::{WatchHandle, WatchRequest, WatchSignal, watch};
 
-use crate::{settings::Settings, theme, treemap, volume};
+use crate::{
+    settings::Settings,
+    theme, treemap, volume,
+    volume_switcher::{self, VolumeRootKey, VolumeSwitcherAction, VolumeSwitcherState},
+};
 
 const MAX_SCAN_EVENTS_PER_FRAME: usize = 2_048;
 const MAX_SCAN_WORK_PER_FRAME: Duration = Duration::from_millis(5);
@@ -87,6 +91,7 @@ struct FileOpDialog {
 
 pub struct VoidspaceApp {
     typography: theme::Typography,
+    volume_switcher: VolumeSwitcherState,
     tabs: Vec<ScanTab>,
     active_tab: usize,
     next_scan_id: u64,
@@ -120,6 +125,7 @@ impl VoidspaceApp {
         let (volume_refresh_tx, volume_refresh_rx) = bounded(1);
         let mut app = Self {
             typography,
+            volume_switcher: VolumeSwitcherState::default(),
             tabs: Vec::new(),
             active_tab: 0,
             next_scan_id: 1,
@@ -146,17 +152,14 @@ impl VoidspaceApp {
         if let Some(index) = arguments.iter().position(|argument| argument == "--scan")
             && let Some(scope) = arguments.get(index + 1)
         {
-            app.scope_text = scope.clone();
-            app.start_scan(PathBuf::from(scope));
+            app.open_or_activate_scan(PathBuf::from(scope));
         }
-        if app.tabs.is_empty() {
-            app.request_volume_refresh(&context.egui_ctx);
-        }
+        app.request_volume_refresh(&context.egui_ctx);
         app
     }
 
     fn request_volume_refresh(&mut self, context: &egui::Context) {
-        if self.volume_refresh_in_flight || !self.tabs.is_empty() {
+        if self.volume_refresh_in_flight {
             return;
         }
         self.volume_refresh_in_flight = true;
@@ -169,7 +172,27 @@ impl VoidspaceApp {
         });
     }
 
-    fn start_scan(&mut self, root_path: PathBuf) {
+    fn open_or_activate_scan(&mut self, requested: PathBuf) {
+        if let Some(index) = volume_switcher::matching_volume_tab_index(
+            self.tabs.iter().map(|tab| tab.root_path.as_path()),
+            &requested,
+        ) {
+            self.active_tab = index;
+            self.scope_text = self.tabs[index].root_path.display().to_string();
+            self.volume_switcher.open = false;
+            self.volume_switcher.issue = None;
+            return;
+        }
+        self.scope_text = requested.display().to_string();
+        if self.start_scan(requested) {
+            self.volume_switcher.open = false;
+            self.volume_switcher.issue = None;
+        } else {
+            self.volume_switcher.issue = self.toast.clone();
+        }
+    }
+
+    fn start_scan(&mut self, root_path: PathBuf) -> bool {
         self.settings.last_scope = root_path.display().to_string();
         if let Err(error) = self.settings.save() {
             let _ = crate::diagnostics::log_line(&format!("settings save failed: {error}"));
@@ -181,7 +204,7 @@ impl VoidspaceApp {
             Ok(root) => root,
             Err(error) => {
                 self.toast = Some(error.to_string());
-                return;
+                return false;
             }
         };
         let index = Index::new(
@@ -200,7 +223,7 @@ impl VoidspaceApp {
             Ok(handle) => Some(handle),
             Err(error) => {
                 self.toast = Some(error.to_string());
-                return;
+                return false;
             }
         };
         let (watch_tx, watch_rx) = bounded(4096);
@@ -241,6 +264,7 @@ impl VoidspaceApp {
             volume_usage,
         });
         self.active_tab = self.tabs.len() - 1;
+        true
     }
 
     fn update_workers(&mut self, context: &egui::Context) {
@@ -252,8 +276,23 @@ impl VoidspaceApp {
                 &mut self.volume_discovery_error,
                 result,
             );
+            let roots = self
+                .available_volumes
+                .iter()
+                .filter_map(|volume| VolumeRootKey::from_scan_root(&volume.root_path))
+                .collect::<Vec<_>>();
+            self.volume_switcher.focused = volume_switcher::repair_volume_focus(
+                self.volume_switcher.focused,
+                self.volume_switcher.focused_index,
+                &roots,
+            );
+            self.volume_switcher.focused_index = self
+                .volume_switcher
+                .focused
+                .and_then(|focused| roots.iter().position(|root| *root == focused))
+                .unwrap_or(0);
         }
-        if self.tabs.is_empty() {
+        if self.tabs.is_empty() || self.volume_switcher.open {
             let elapsed = self.volume_refresh_started_at.elapsed();
             if !self.volume_refresh_in_flight && elapsed >= VOLUME_REFRESH_INTERVAL {
                 self.request_volume_refresh(context);
@@ -379,7 +418,12 @@ impl VoidspaceApp {
     }
 
     fn top_bar(&mut self, root_ui: &mut egui::Ui) {
-        let mut normal_scan = false;
+        let active_root = self
+            .tabs
+            .get(self.active_tab)
+            .and_then(|tab| VolumeRootKey::from_scan_root(&tab.root_path));
+        let was_switcher_open = self.volume_switcher.open;
+        let mut switcher_action = VolumeSwitcherAction::None;
         egui::Panel::top("topbar")
             .exact_size(56.0)
             .frame(
@@ -401,23 +445,26 @@ impl VoidspaceApp {
                     let compact = ui.available_width() < 820.0;
                     let turbo_width = if compact { 112.0 } else { 132.0 };
                     let fixed = turbo_width + if compact { 20.0 } else { 30.0 };
-                    let fields = (ui.available_width() - fixed).max(280.0);
+                    let fields = (ui.available_width() - fixed).max(360.0);
                     let filter_width = if compact {
                         (fields * 0.42).clamp(150.0, 220.0)
                     } else {
                         (fields * 0.40).clamp(180.0, 340.0)
                     };
-                    let scope_width = (fields - filter_width - 10.0).max(130.0);
-                    let scope = ui.add_sized(
-                        [scope_width, 36.0],
-                        egui::TextEdit::singleline(&mut self.scope_text)
-                            .hint_text("C:\\ · press Enter to scan")
-                            .font(self.typography.font(theme::TypographyToken::DataNormal))
-                            .margin(egui::Margin::symmetric(11, 8)),
-                    );
-                    if scope.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
-                        normal_scan = true;
-                    }
+                    let scope_width = (fields - filter_width - 10.0).max(210.0);
+                    ui.allocate_ui(egui::vec2(scope_width, 36.0), |ui| {
+                        ui.set_width(scope_width);
+                        switcher_action = volume_switcher::show(
+                            ui,
+                            &mut self.scope_text,
+                            &mut self.volume_switcher,
+                            &self.available_volumes,
+                            active_root,
+                            self.volume_refresh_in_flight,
+                            self.volume_discovery_error.as_deref(),
+                            &self.typography,
+                        );
+                    });
                     let filter_response = ui.add_sized(
                         [filter_width, 36.0],
                         egui::TextEdit::singleline(&mut self.filter_text)
@@ -467,8 +514,16 @@ impl VoidspaceApp {
                     .on_hover_text("Voidspace is already running with administrator privileges");
                 });
             });
-        if normal_scan {
-            self.start_scan(PathBuf::from(self.scope_text.trim()));
+        match switcher_action {
+            VolumeSwitcherAction::None => {}
+            VolumeSwitcherAction::Close => self.volume_switcher.open = false,
+            VolumeSwitcherAction::OpenOrActivate(path) => self.open_or_activate_scan(path),
+        }
+        if self.volume_switcher.open
+            && (!was_switcher_open
+                || self.volume_refresh_started_at.elapsed() >= VOLUME_REFRESH_INTERVAL)
+        {
+            self.request_volume_refresh(root_ui.ctx());
         }
     }
 
@@ -873,8 +928,7 @@ impl VoidspaceApp {
                     });
                 });
             if let Some(root) = scan_root {
-                self.scope_text = root.display().to_string();
-                self.start_scan(root);
+                self.open_or_activate_scan(root);
             }
             return;
         }
