@@ -6,11 +6,102 @@ use voidspace_layout::{
 };
 use voidspace_model::{DirtySet, NodeId};
 
-use crate::theme;
+use crate::{
+    theme,
+    treemap_state::{AggregateSelection, TreemapAction},
+};
 
 const TILE_GAP: f32 = 4.0;
 const TILE_INSET: f32 = TILE_GAP / 2.0;
 const PREVIEW_HEADER: f32 = 38.0;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Activation {
+    Single,
+    Double,
+    KeyboardZoom,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum HitKind {
+    BaseDirectory,
+    BaseLeaf,
+    Nested {
+        expandable: bool,
+    },
+    Aggregate {
+        parent: NodeId,
+        depth: u8,
+        members: Vec<NodeId>,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ActionHit {
+    node_id: NodeId,
+    kind: HitKind,
+}
+
+impl ActionHit {
+    fn base_directory(node_id: NodeId) -> Self {
+        Self {
+            node_id,
+            kind: HitKind::BaseDirectory,
+        }
+    }
+
+    fn base_leaf(node_id: NodeId) -> Self {
+        Self {
+            node_id,
+            kind: HitKind::BaseLeaf,
+        }
+    }
+
+    fn nested(node_id: NodeId, expandable: bool) -> Self {
+        Self {
+            node_id,
+            kind: HitKind::Nested { expandable },
+        }
+    }
+
+    fn aggregate(parent: NodeId, depth: u8, members: Vec<NodeId>) -> Self {
+        Self {
+            node_id: parent,
+            kind: HitKind::Aggregate {
+                parent,
+                depth,
+                members,
+            },
+        }
+    }
+}
+
+fn action_for_hit(hit: &ActionHit, activation: Activation) -> TreemapAction {
+    match &hit.kind {
+        HitKind::Aggregate {
+            parent,
+            depth,
+            members,
+        } => TreemapAction::OpenAggregate(AggregateSelection {
+            parent: *parent,
+            depth: *depth,
+            members: members.clone(),
+        }),
+        HitKind::BaseDirectory
+            if matches!(activation, Activation::Double | Activation::KeyboardZoom) =>
+        {
+            TreemapAction::Zoom(hit.node_id)
+        }
+        HitKind::Nested { expandable: true }
+            if matches!(activation, Activation::Double | Activation::KeyboardZoom) =>
+        {
+            TreemapAction::Zoom(hit.node_id)
+        }
+        HitKind::BaseDirectory => TreemapAction::ActivateBaseDirectory(hit.node_id),
+        HitKind::BaseLeaf => TreemapAction::ActivateBaseLeaf(hit.node_id),
+        HitKind::Nested { .. } => TreemapAction::ActivateNested(hit.node_id),
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct PreviewState {
@@ -397,4 +488,68 @@ fn blend(foreground: Color32, background: Color32, amount: f32) -> Color32 {
         channel(foreground.g(), background.g()),
         channel(foreground.b(), background.b()),
     )
+}
+
+#[cfg(test)]
+mod interaction_tests {
+    use super::*;
+    use crate::TreemapState;
+
+    #[test]
+    fn recognized_double_click_supersedes_pin() {
+        let hit = ActionHit::base_directory(NodeId(7));
+        assert_eq!(
+            action_for_hit(&hit, Activation::Single),
+            crate::TreemapAction::ActivateBaseDirectory(NodeId(7))
+        );
+        assert_eq!(
+            action_for_hit(&hit, Activation::Double),
+            crate::TreemapAction::Zoom(NodeId(7))
+        );
+    }
+
+    #[test]
+    fn nested_leaf_preserves_pin_and_other_never_zooms() {
+        let nested = ActionHit::nested(NodeId(8), false);
+        assert_eq!(
+            action_for_hit(&nested, Activation::Single),
+            crate::TreemapAction::ActivateNested(NodeId(8))
+        );
+        assert_eq!(
+            action_for_hit(&nested, Activation::KeyboardZoom),
+            crate::TreemapAction::ActivateNested(NodeId(8))
+        );
+
+        let expandable_nested = ActionHit::nested(NodeId(11), true);
+        assert_eq!(
+            action_for_hit(&expandable_nested, Activation::KeyboardZoom),
+            crate::TreemapAction::Zoom(NodeId(11))
+        );
+
+        let other = ActionHit::aggregate(NodeId(2), 1, vec![NodeId(9), NodeId(10)]);
+        assert!(matches!(
+            action_for_hit(&other, Activation::Double),
+            crate::TreemapAction::OpenAggregate(_)
+        ));
+    }
+
+    #[test]
+    fn leaves_never_zoom_and_recognized_second_click_clears_the_first_click_pin() {
+        let leaf = ActionHit::base_leaf(NodeId(12));
+        assert_eq!(
+            action_for_hit(&leaf, Activation::Double),
+            crate::TreemapAction::ActivateBaseLeaf(NodeId(12))
+        );
+
+        let root = NodeId(1);
+        let directory = NodeId(7);
+        let hit = ActionHit::base_directory(directory);
+        let mut state = TreemapState::new(root);
+        state.apply(action_for_hit(&hit, Activation::Single));
+        assert_eq!(state.pinned, Some(directory));
+        state.apply(action_for_hit(&hit, Activation::Double));
+        assert_eq!(state.selected, Some(directory));
+        assert_eq!(state.pinned, None);
+        assert_eq!(state.aggregate, None);
+    }
 }
