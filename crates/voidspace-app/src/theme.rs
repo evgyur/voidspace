@@ -174,14 +174,27 @@ pub fn release_typography_diagnostic() -> Result<String, String> {
 }
 
 fn register_weight(fonts: &mut FontDefinitions, family: &str, bytes: &'static [u8], weight: f32) {
+    let fallback_family = if family.starts_with("voidspace.jetbrains") {
+        FontFamily::Monospace
+    } else {
+        FontFamily::Proportional
+    };
+    let fallbacks = fonts
+        .families
+        .get(&fallback_family)
+        .cloned()
+        .unwrap_or_default();
     let data = FontData::from_static(bytes).tweak(FontTweak {
         coords: VariationCoords::new([(b"wght", weight)]),
         ..Default::default()
     });
     fonts.font_data.insert(family.into(), data.into());
-    fonts
-        .families
-        .insert(FontFamily::Name(family.into()), vec![family.to_owned()]);
+    fonts.families.insert(
+        FontFamily::Name(family.into()),
+        std::iter::once(family.to_owned())
+            .chain(fallbacks)
+            .collect(),
+    );
 }
 
 fn selected_definitions() -> FontDefinitions {
@@ -296,5 +309,22 @@ mod typography_tests {
         assert!(!typography.update_pixels_per_point(1.0));
         assert!(typography.update_pixels_per_point(1.25));
         assert_eq!(typography.epoch(), initial + 1);
+    }
+
+    #[test]
+    fn named_families_retain_offline_symbol_fallbacks() {
+        let definitions = selected_definitions();
+        for family in [
+            "voidspace.unbounded.700",
+            "voidspace.golos.500",
+            "voidspace.jetbrains.500",
+        ] {
+            let chain = definitions
+                .families
+                .get(&FontFamily::Name(family.into()))
+                .expect("registered named family");
+            assert_eq!(chain.first().map(String::as_str), Some(family));
+            assert!(chain.len() > 1, "{family} has no glyph fallback");
+        }
     }
 }
