@@ -59,13 +59,19 @@ foreach ($name in $rootFiles) {
     $from = Join-Path $source $name
     $to = Join-Path $installDir $name
     $next = "$to.new"
+    $old = "$to.old"
     if (Test-Path -LiteralPath $next) { Remove-Item -LiteralPath $next -Force }
+    if (Test-Path -LiteralPath $old) { Remove-Item -LiteralPath $old -Force }
     Copy-Item -LiteralPath $from -Destination $next -Force
     if ((Get-Sha256 $from) -ne (Get-Sha256 $next)) {
         throw "Staged install copy mismatch: $name"
     }
     if (Test-Path -LiteralPath $to) {
-        [IO.File]::Replace($next, $to, $null)
+        [IO.File]::Replace($next, $to, $old)
+        if ((Get-Sha256 $from) -ne (Get-Sha256 $to)) {
+            throw "Installed root file mismatch: $name"
+        }
+        Remove-Item -LiteralPath $old -Force
     }
     else {
         Move-Item -LiteralPath $next -Destination $to
