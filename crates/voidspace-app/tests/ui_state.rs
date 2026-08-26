@@ -1,5 +1,8 @@
 use voidspace_app::settings::Settings;
-use voidspace_app::{PreviewState, WorkspaceMode, workspace_mode};
+use voidspace_app::{
+    AggregateSelection, PreviewState, TreemapAction, TreemapState, ViewPath, WorkspaceMode,
+    workspace_mode,
+};
 use voidspace_model::NodeId;
 
 #[test]
@@ -49,4 +52,110 @@ fn left_click_pins_and_empty_canvas_click_clears_preview() {
 
     state.apply_canvas_click(None);
     assert_eq!(state.active(None), None);
+}
+
+#[test]
+fn nested_zoom_builds_canonical_path_and_back_returns_real_parent() {
+    let root = NodeId(1);
+    let parent = NodeId(2);
+    let nested = NodeId(3);
+    let parent_of = |id| match id {
+        NodeId(2) => Some(root),
+        NodeId(3) => Some(parent),
+        _ => None,
+    };
+    let mut path = ViewPath::root(root);
+    path.rebuild(nested, parent_of).unwrap();
+
+    assert_eq!(path.as_slice(), &[root, parent, nested]);
+    assert_eq!(path.back(), Some(parent));
+    assert_eq!(path.as_slice(), &[root, parent]);
+}
+
+#[test]
+fn action_reducer_distinguishes_selection_pin_and_zoom() {
+    let root = NodeId(1);
+    let directory = NodeId(2);
+    let nested = NodeId(3);
+    let mut state = TreemapState::new(root);
+
+    state.apply(TreemapAction::ActivateBaseDirectory(directory));
+    assert_eq!(state.selected, Some(directory));
+    assert_eq!(state.pinned, Some(directory));
+
+    state.apply(TreemapAction::ActivateNested(nested));
+    assert_eq!(state.selected, Some(nested));
+    assert_eq!(state.pinned, Some(directory));
+
+    state.apply(TreemapAction::Zoom(nested));
+    assert_eq!(state.selected, Some(nested));
+    assert_eq!(state.pinned, None);
+    assert_eq!(state.aggregate, None);
+
+    state.apply(TreemapAction::ActivateBaseDirectory(directory));
+    state.apply(TreemapAction::ActivateBaseLeaf(NodeId(4)));
+    assert_eq!(state.selected, Some(NodeId(4)));
+    assert_eq!(state.pinned, None);
+
+    state.apply(TreemapAction::OpenAggregate(AggregateSelection {
+        parent: directory,
+        depth: 1,
+        members: vec![NodeId(5), NodeId(6)],
+    }));
+    assert_eq!(state.selected, Some(directory));
+    assert_eq!(
+        state
+            .aggregate
+            .as_ref()
+            .map(|group| group.members.as_slice()),
+        Some(&[NodeId(5), NodeId(6)][..])
+    );
+    state.apply(TreemapAction::ClearPreview);
+    assert_eq!(state.selected, Some(directory));
+    assert_eq!(
+        state.aggregate.as_ref().map(|group| group.members.len()),
+        Some(2)
+    );
+}
+
+#[test]
+fn live_repair_prunes_missing_tail_and_clears_stale_transient_state() {
+    let mut state = TreemapState::new(NodeId(1));
+    state.view_path = ViewPath::from_ids(vec![NodeId(1), NodeId(2), NodeId(3)]).unwrap();
+    state.selected = Some(NodeId(3));
+    state.pinned = Some(NodeId(2));
+    state.aggregate = Some(AggregateSelection {
+        parent: NodeId(3),
+        depth: 1,
+        members: vec![NodeId(4)],
+    });
+
+    state.repair(
+        |id| id != NodeId(3),
+        |id| match id {
+            NodeId(2) => Some(NodeId(1)),
+            _ => None,
+        },
+    );
+
+    assert_eq!(state.view_path.as_slice(), &[NodeId(1), NodeId(2)]);
+    assert_eq!(state.selected, Some(NodeId(2)));
+    assert_eq!(state.pinned, Some(NodeId(2)));
+    assert_eq!(state.aggregate, None);
+}
+
+#[test]
+fn live_repair_truncates_at_the_first_broken_internal_link() {
+    let mut state = TreemapState::new(NodeId(1));
+    state.view_path = ViewPath::from_ids(vec![NodeId(1), NodeId(2), NodeId(3), NodeId(4)]).unwrap();
+    state.repair(
+        |_| true,
+        |id| match id {
+            NodeId(2) => Some(NodeId(1)),
+            NodeId(3) => Some(NodeId(99)),
+            NodeId(4) => Some(NodeId(3)),
+            _ => None,
+        },
+    );
+    assert_eq!(state.view_path.as_slice(), &[NodeId(1), NodeId(2)]);
 }
