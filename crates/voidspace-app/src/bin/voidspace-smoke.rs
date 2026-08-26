@@ -12,6 +12,16 @@ use voidspace_scan::{ScanRequest, describe_root, start};
 
 fn main() -> anyhow::Result<()> {
     let arguments: Vec<String> = std::env::args().collect();
+    if arguments
+        .get(1)
+        .is_some_and(|value| value == "--typography")
+    {
+        println!(
+            "{}",
+            voidspace_app::release_typography_diagnostic().map_err(anyhow::Error::msg)?
+        );
+        return Ok(());
+    }
     if arguments.get(1).is_some_and(|value| value == "--delete") {
         let allowed_root = PathBuf::from(arguments.get(2).context("missing allowed root")?);
         let target = PathBuf::from(arguments.get(3).context("missing delete target")?);

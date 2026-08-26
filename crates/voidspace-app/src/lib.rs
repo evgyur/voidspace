@@ -10,6 +10,7 @@ mod volume;
 mod volume_switcher;
 
 pub use app::{VoidspaceApp, WorkspaceMode, workspace_mode};
+pub use theme::release_typography_diagnostic;
 pub use treemap::PreviewState;
 pub use treemap_state::{AggregateSelection, TreemapAction, TreemapState, ViewPath};
 pub use volume_switcher::{

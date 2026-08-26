@@ -8,6 +8,11 @@ $out2 = Join-Path $smokeBase 'out-after'
 $deleteTarget = Join-Path $root 'delete-only-this'
 
 try {
+    $typography = & cargo run --quiet -p voidspace-app --bin voidspace-smoke --release -- --typography
+    if ($LASTEXITCODE -ne 0) { throw 'embedded typography smoke failed' }
+    if ($typography -notmatch '^typography_source=embedded-selected ') { throw 'selected typography was not active' }
+    Write-Output $typography
+
     New-Item -ItemType Directory -Force $root, $out1, $out2, $deleteTarget | Out-Null
     [System.IO.File]::WriteAllBytes((Join-Path $root 'alpha.bin'), [byte[]]::new(8192))
     [System.IO.File]::WriteAllText((Join-Path $deleteTarget 'gone.txt'), 'temporary')

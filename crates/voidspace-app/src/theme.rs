@@ -161,6 +161,18 @@ fn validate_selected_assets() -> Result<(), String> {
     )
 }
 
+pub fn release_typography_diagnostic() -> Result<String, String> {
+    validate_selected_assets()?;
+    Ok(concat!(
+        "typography_source=embedded-selected ",
+        "google_fonts_revision=6a003b5eb672dc8bf5bff5937cf5863f8b175445 ",
+        "unbounded_sha256=323b511be380c8d474ef030686b71aedde501f8d9cd46da558b7c40454372c3f ",
+        "golos_sha256=17bb58fb69aec2dfb047a2ebf52534023e9b688c97a6b7ac795b0a72912c2063 ",
+        "jetbrains_sha256=48715a42ec242c21e9f02692891e147d022299a52e48d5e413e1a942193ffeda"
+    )
+    .to_owned())
+}
+
 fn register_weight(fonts: &mut FontDefinitions, family: &str, bytes: &'static [u8], weight: f32) {
     let data = FontData::from_static(bytes).tweak(FontTweak {
         coords: VariationCoords::new([(b"wght", weight)]),
@@ -253,6 +265,11 @@ mod typography_tests {
     #[test]
     fn approved_assets_match_hash_axis_and_cyrillic_contract() {
         validate_selected_assets().unwrap();
+        assert!(
+            release_typography_diagnostic()
+                .unwrap()
+                .starts_with("typography_source=embedded-selected")
+        );
     }
 
     #[test]
