@@ -62,7 +62,7 @@ Each card is one large click target and contains:
 - middle: a thin used-capacity bar with a dark track and orange fill;
 - bottom-left: `USED 1.30 TB`;
 - bottom-right: `FREE 698.9 GB`;
-- the used percentage beside the bar, visible at every supported card width.
+- the used percentage, rounded to a whole number such as `65%`, beside the bar and visible at every supported card width.
 
 Normal state uses `SURFACE` with a one-pixel `LINE` border. Hover changes the border to orange and slightly raises the surface color. Pressed state uses the existing orange interaction treatment. The whole card receives pointer and keyboard focus semantics.
 
@@ -111,7 +111,7 @@ The non-Windows implementation returns an empty list so the crate remains portab
 
 `VoidspaceApp` stores the current volume list, the last refresh time, an in-flight flag, and a channel for discovery results.
 
-1. App creation starts a short-lived discovery worker immediately; Windows volume APIs never run on the UI thread.
+1. After startup arguments are processed, app creation starts a short-lived discovery worker only when no `--scan` argument already created a scan tab; Windows volume APIs never run on the UI thread.
 2. The worker sends `Result<Vec<VolumeInfo>, String>` through the channel and requests an egui repaint when it finishes.
 3. While no scan tabs exist, the app schedules another refresh no sooner than three seconds after the previous worker started. Only one worker can be in flight.
 4. The empty-state render also calls `request_repaint_after` for the remaining refresh interval, so the reactive egui loop wakes even when the user is idle.
@@ -136,6 +136,7 @@ The non-Windows implementation returns an empty list so the crate remains portab
 - Unit-test zero-capacity percentage and a transient discovery failure retaining the previous cache.
 - Unit-test responsive column calculation at narrow, standard, and wide widths.
 - Unit-test percentage visibility and label truncation at the minimum 280-pixel card width.
+- Verify Enter/Space card activation and the idle-loop repaint schedule.
 - Run formatting, Clippy with warnings denied, the full workspace test suite, release packaging, and smoke verification.
 - Launch the packaged executable and visually verify the real C: card contains its Windows label, approximately `2.00 TB` total, `1.30 TB` used, and current free space with no overlap.
 - Click the C: card and verify it transitions directly into the scanning treemap.
