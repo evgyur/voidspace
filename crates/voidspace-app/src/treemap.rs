@@ -1,8 +1,10 @@
-use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Ui};
+use std::{collections::HashMap, sync::Arc};
+
+use egui::{Align2, Color32, FontId, Galley, Pos2, Rect, Sense, Stroke, StrokeKind, Ui};
 use voidspace_filter::{Expr, FilterContext, matches};
 use voidspace_index::IndexSnapshot;
 use voidspace_layout::{
-    LayoutNode, LayoutSnapshot, Rect as LayoutRect, SizeMode, ViewState, layout,
+    LabelFootprint, LayoutNode, LayoutSnapshot, Rect as LayoutRect, SizeMode, ViewState, layout,
 };
 use voidspace_model::{DirtySet, NodeId};
 
@@ -14,6 +16,360 @@ use crate::{
 const TILE_GAP: f32 = 4.0;
 const TILE_INSET: f32 = TILE_GAP / 2.0;
 const PREVIEW_HEADER: f32 = 38.0;
+
+#[derive(Clone, Debug, PartialEq)]
+struct LabelPlanKey {
+    snapshot_version: u64,
+    typography_epoch: u64,
+    size_mode: SizeMode,
+    bounds: [f32; 2],
+}
+
+impl LabelPlanKey {
+    fn new(
+        snapshot_version: u64,
+        typography_epoch: u64,
+        size_mode: SizeMode,
+        bounds: [f32; 2],
+    ) -> Self {
+        Self {
+            snapshot_version,
+            typography_epoch,
+            size_mode,
+            bounds,
+        }
+    }
+
+    fn matches(
+        &self,
+        snapshot_version: u64,
+        typography_epoch: u64,
+        size_mode: SizeMode,
+        bounds: [f32; 2],
+    ) -> bool {
+        self == &Self::new(snapshot_version, typography_epoch, size_mode, bounds)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LabelTier {
+    Large,
+    Compact,
+    SizeOnly,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct LabelMeasurements {
+    large_width: f32,
+    large_height: f32,
+    compact_width: f32,
+    compact_height: f32,
+    size_width: f32,
+    size_height: f32,
+}
+
+fn choose_label_tier(size: [f32; 2], metrics: LabelMeasurements) -> Option<LabelTier> {
+    if size[0] >= metrics.large_width && size[1] >= metrics.large_height {
+        Some(LabelTier::Large)
+    } else if size[0] >= metrics.compact_width && size[1] >= metrics.compact_height {
+        Some(LabelTier::Compact)
+    } else if size[0] >= metrics.size_width && size[1] >= metrics.size_height {
+        Some(LabelTier::SizeOnly)
+    } else {
+        None
+    }
+}
+
+pub fn compact_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 7] = ["B", "K", "M", "G", "T", "P", "E"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes}B")
+    } else if value < 100.0 {
+        format!("{value:.1}{}", UNITS[unit])
+    } else {
+        format!("{value:.0}{}", UNITS[unit])
+    }
+}
+
+fn footprint_labels(sorted_sizes: &[u64], real_budget: usize) -> Vec<String> {
+    let keep_limit = sorted_sizes.len().min(real_budget).min(128);
+    let mut labels = sorted_sizes[..keep_limit]
+        .iter()
+        .map(|size| compact_bytes(*size))
+        .collect::<Vec<_>>();
+    let mut suffix = sorted_sizes[keep_limit..]
+        .iter()
+        .copied()
+        .fold(0_u64, u64::saturating_add);
+    labels.push(compact_bytes(suffix));
+    for size in sorted_sizes[..keep_limit].iter().rev() {
+        suffix = suffix.saturating_add(*size);
+        labels.push(compact_bytes(suffix));
+    }
+    labels
+}
+
+pub(crate) struct CandidateMetrics {
+    footprint: LabelFootprint,
+    compact_size_galleys: HashMap<String, Arc<Galley>>,
+}
+
+impl CandidateMetrics {
+    pub(crate) fn footprint(&self) -> LabelFootprint {
+        self.footprint
+    }
+}
+
+pub(crate) fn candidate_metrics(
+    ui: &egui::Ui,
+    snapshot: &IndexSnapshot,
+    root: NodeId,
+    real_budget: usize,
+    typography: &theme::Typography,
+) -> CandidateMetrics {
+    let mut sizes = snapshot
+        .node(root)
+        .into_iter()
+        .flat_map(|node| node.children.iter())
+        .filter_map(|id| snapshot.node(*id).map(|node| node.allocated))
+        .filter(|size| *size > 0)
+        .collect::<Vec<_>>();
+    sizes.sort_unstable_by(|left, right| right.cmp(left));
+    let font = typography.font(theme::TypographyToken::DataCompact);
+    let compact_size_galleys = footprint_labels(&sizes, real_budget)
+        .into_iter()
+        .map(|text| {
+            let galley = ui
+                .painter()
+                .layout_no_wrap(text.clone(), font.clone(), theme::TILE_MUTED);
+            (text, galley)
+        })
+        .collect::<HashMap<_, _>>();
+    let max_width = compact_size_galleys
+        .values()
+        .map(|galley| galley.size().x)
+        .fold(0.0, f32::max);
+    let max_height = compact_size_galleys
+        .values()
+        .map(|galley| galley.size().y)
+        .fold(0.0, f32::max);
+    CandidateMetrics {
+        footprint: LabelFootprint::new(
+            max_width + 2.0 * (TILE_INSET + 5.0) + 2.0,
+            max_height + 2.0 * (TILE_INSET + 4.0) + 2.0,
+        ),
+        compact_size_galleys,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct TileIdentity {
+    node_id: NodeId,
+    render_depth: u8,
+    aggregated: bool,
+}
+
+struct TileLabelPlan {
+    identity: TileIdentity,
+    tier: LabelTier,
+    final_name: Option<String>,
+    formatted_size: String,
+    name_font: Option<FontId>,
+    size_font: FontId,
+    name_galley: Option<Arc<Galley>>,
+    size_galley: Arc<Galley>,
+    name_pos: Pos2,
+    size_pos: Pos2,
+    name_color: Color32,
+    inner_rect: Rect,
+}
+
+struct TreemapLabelPlan {
+    key: LabelPlanKey,
+    tiles: HashMap<TileIdentity, TileLabelPlan>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_label_plan(
+    ui: &Ui,
+    snapshot: &IndexSnapshot,
+    layout: &LayoutSnapshot,
+    clip: Rect,
+    render_depth: u8,
+    metrics: &CandidateMetrics,
+    typography: &theme::Typography,
+    filter: Option<&Expr>,
+) -> TreemapLabelPlan {
+    let mut tiles = HashMap::new();
+    for node in layout.nodes.iter().filter(|node| node.depth == 1) {
+        let rect = visual_rect(node.rect, clip);
+        let index_node = snapshot.node(node.node_id);
+        let matches_filter = node.aggregated
+            || filter.is_none_or(|expression| {
+                index_node.is_some_and(|entry| {
+                    matches(
+                        expression,
+                        FilterContext {
+                            node: entry,
+                            path: &entry.name.display_escaped(),
+                        },
+                    )
+                })
+            });
+        let raw_name = if node.aggregated {
+            format!("OTHER · {} ITEMS", node.aggregate_count)
+        } else {
+            index_node
+                .map(|entry| entry.name.display_escaped())
+                .unwrap_or_else(|| "?".to_owned())
+        };
+        let formatted_size = compact_bytes(if node.aggregated {
+            node.aggregate_size
+        } else {
+            index_node.map_or(0, |entry| entry.allocated)
+        });
+        let size_font = typography.font(theme::TypographyToken::DataCompact);
+        let size_galley = metrics
+            .compact_size_galleys
+            .get(&formatted_size)
+            .cloned()
+            .unwrap_or_else(|| {
+                ui.painter().layout_no_wrap(
+                    formatted_size.clone(),
+                    size_font.clone(),
+                    theme::TILE_MUTED,
+                )
+            });
+        let large_font = typography.font(theme::TypographyToken::TileNameLarge);
+        let compact_font = typography.font(theme::TypographyToken::TileNameCompact);
+        let large_probe =
+            ui.painter()
+                .layout_no_wrap("Ag".to_owned(), large_font.clone(), theme::TEXT);
+        let compact_probe =
+            ui.painter()
+                .layout_no_wrap("Ag".to_owned(), compact_font.clone(), theme::TEXT);
+        let measurements = LabelMeasurements {
+            large_width: (size_galley.size().x + 18.0).max(96.0),
+            large_height: large_probe.size().y + size_galley.size().y + 22.0,
+            compact_width: (size_galley.size().x + 14.0).max(64.0),
+            compact_height: compact_probe.size().y + size_galley.size().y + 15.0,
+            size_width: size_galley.size().x + 12.0,
+            size_height: size_galley.size().y + 10.0,
+        };
+        let Some(tier) = choose_label_tier([rect.width(), rect.height()], measurements) else {
+            continue;
+        };
+        let inner_rect = Rect::from_min_max(
+            rect.min + egui::vec2(6.0, 5.0),
+            rect.max - egui::vec2(6.0, 5.0),
+        );
+        let name_color = if matches_filter {
+            theme::TEXT
+        } else {
+            theme::MUTED
+        };
+        let (final_name, name_font, name_galley, name_pos, size_pos) = match tier {
+            LabelTier::Large | LabelTier::Compact => {
+                let font = if tier == LabelTier::Large {
+                    large_font
+                } else {
+                    compact_font
+                };
+                let (name, galley) = ellipsized_galley(
+                    ui.painter(),
+                    &raw_name,
+                    font.clone(),
+                    name_color,
+                    inner_rect.width(),
+                );
+                let name_pos = inner_rect.left_top();
+                let size_pos = egui::pos2(
+                    inner_rect.left(),
+                    (name_pos.y + galley.size().y + 3.0)
+                        .min(inner_rect.bottom() - size_galley.size().y),
+                );
+                (Some(name), Some(font), Some(galley), name_pos, size_pos)
+            }
+            LabelTier::SizeOnly => (
+                None,
+                None,
+                None,
+                inner_rect.left_top(),
+                inner_rect.left_top(),
+            ),
+        };
+        let identity = TileIdentity {
+            node_id: node.node_id,
+            render_depth,
+            aggregated: node.aggregated,
+        };
+        tiles.insert(
+            identity,
+            TileLabelPlan {
+                identity,
+                tier,
+                final_name,
+                formatted_size,
+                name_font,
+                size_font,
+                name_galley,
+                size_galley,
+                name_pos,
+                size_pos,
+                name_color,
+                inner_rect,
+            },
+        );
+    }
+    TreemapLabelPlan {
+        key: LabelPlanKey::new(
+            layout.index_version,
+            typography.epoch(),
+            SizeMode::Allocated,
+            [clip.width(), clip.height()],
+        ),
+        tiles,
+    }
+}
+
+fn ellipsized_galley(
+    painter: &egui::Painter,
+    text: &str,
+    font: FontId,
+    color: Color32,
+    max_width: f32,
+) -> (String, Arc<Galley>) {
+    let full = painter.layout_no_wrap(text.to_owned(), font.clone(), color);
+    if full.size().x <= max_width {
+        return (text.to_owned(), full);
+    }
+    let characters = text.chars().collect::<Vec<_>>();
+    let mut low = 0;
+    let mut high = characters.len();
+    let mut best = "…".to_owned();
+    let mut best_galley = painter.layout_no_wrap(best.clone(), font.clone(), color);
+    while low <= high {
+        let middle = low + (high - low) / 2;
+        let candidate = format!("{}…", characters[..middle].iter().collect::<String>());
+        let galley = painter.layout_no_wrap(candidate.clone(), font.clone(), color);
+        if galley.size().x <= max_width {
+            best = candidate;
+            best_galley = galley;
+            low = middle.saturating_add(1);
+        } else if middle == 0 {
+            break;
+        } else {
+            high = middle - 1;
+        }
+    }
+    (best, best_galley)
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Activation {
@@ -145,6 +501,8 @@ pub fn show(
     selected: Option<NodeId>,
     filter: Option<&Expr>,
     preview: PreviewState,
+    typography: &theme::Typography,
+    base_metrics: &CandidateMetrics,
 ) -> TreemapResponse {
     let desired = ui.available_size();
     let (response, painter) = ui.allocate_painter(desired, Sense::click());
@@ -160,6 +518,23 @@ pub fn show(
         .iter()
         .filter(|node| node.depth == 1)
         .collect();
+    let base_plan = build_label_plan(
+        ui,
+        snapshot,
+        base_layout,
+        bounds,
+        1,
+        base_metrics,
+        typography,
+        filter,
+    );
+    assert!(base_plan.key.matches(
+        base_layout.index_version,
+        typography.epoch(),
+        SizeMode::Allocated,
+        [bounds.width(), bounds.height()],
+    ));
+    paint_layout_overflow(&painter, base_layout, bounds, typography);
     let hovered_preview = pointer.and_then(|position| {
         base_nodes
             .iter()
@@ -197,7 +572,14 @@ pub fn show(
             selected,
             filter,
             active_preview == Some(node.node_id),
-            false,
+            base_plan
+                .tiles
+                .get(&TileIdentity {
+                    node_id: node.node_id,
+                    render_depth: 1,
+                    aggregated: node.aggregated,
+                })
+                .expect("layout emitted a tile without a measured label"),
         );
         base_hits.push(VisibleHit {
             node_id: node.node_id,
@@ -226,6 +608,7 @@ pub fn show(
             ),
         );
         if content.width() >= 80.0 && content.height() >= 48.0 {
+            let nested_metrics = candidate_metrics(ui, snapshot, preview_root, 512, typography);
             let nested_layout = layout(
                 snapshot,
                 &ViewState {
@@ -239,11 +622,28 @@ pub fn show(
                     size_mode: SizeMode::Allocated,
                     max_depth: 1,
                     min_area: 196.0,
-                    min_label: voidspace_layout::LabelFootprint::new(54.0, 22.0),
+                    min_label: nested_metrics.footprint(),
                     max_rectangles: 512,
                 },
                 &DirtySet::default(),
             );
+            let nested_plan = build_label_plan(
+                ui,
+                snapshot,
+                &nested_layout,
+                content,
+                2,
+                &nested_metrics,
+                typography,
+                filter,
+            );
+            assert!(nested_plan.key.matches(
+                nested_layout.index_version,
+                typography.epoch(),
+                SizeMode::Allocated,
+                [content.width(), content.height()],
+            ));
+            paint_layout_overflow(&painter, &nested_layout, content, typography);
             for (rank, node) in nested_layout
                 .nodes
                 .iter()
@@ -263,7 +663,14 @@ pub fn show(
                     selected,
                     filter,
                     false,
-                    true,
+                    nested_plan
+                        .tiles
+                        .get(&TileIdentity {
+                            node_id: node.node_id,
+                            render_depth: 2,
+                            aggregated: node.aggregated,
+                        })
+                        .expect("nested layout emitted a tile without a measured label"),
                 );
                 nested_hits.push(VisibleHit {
                     node_id: node.node_id,
@@ -359,7 +766,7 @@ fn paint_tile(
     selected: Option<NodeId>,
     filter: Option<&Expr>,
     preview_active: bool,
-    nested: bool,
+    label: &TileLabelPlan,
 ) {
     let index_node = snapshot.node(node.node_id);
     let accent = accent_for(rank, node.aggregated);
@@ -404,49 +811,49 @@ fn paint_tile(
         StrokeKind::Inside,
     );
 
-    let name = if node.aggregated {
-        format!("OTHER · {} ITEMS", node.aggregate_count)
-    } else {
-        index_node
-            .map(|node| node.name.display_escaped())
-            .unwrap_or_default()
-    };
-    let minimum_width = if nested { 74.0 } else { 96.0 };
-    let minimum_height = if nested { 30.0 } else { 42.0 };
-    if rect.width() < minimum_width || rect.height() < minimum_height {
-        return;
+    debug_assert_eq!(label.identity.node_id, node.node_id);
+    debug_assert!(!label.formatted_size.is_empty());
+    debug_assert!(label.inner_rect.contains(label.size_pos));
+    match label.tier {
+        LabelTier::Large | LabelTier::Compact => {
+            debug_assert!(label.final_name.is_some());
+            debug_assert!(label.name_font.is_some());
+            if let Some(name) = &label.name_galley {
+                painter.galley(label.name_pos, name.clone(), label.name_color);
+            }
+            painter.galley(label.size_pos, label.size_galley.clone(), theme::TILE_MUTED);
+        }
+        LabelTier::SizeOnly => {
+            debug_assert!(label.final_name.is_none());
+            painter.galley(label.size_pos, label.size_galley.clone(), theme::TEXT);
+        }
     }
-    let max_chars = ((rect.width() - 16.0) / 7.2).max(4.0) as usize;
-    let clipped = if name.chars().count() > max_chars {
-        let take = max_chars.saturating_sub(1);
-        format!("{}…", name.chars().take(take).collect::<String>())
-    } else {
-        name
+}
+
+fn paint_layout_overflow(
+    painter: &egui::Painter,
+    layout: &LayoutSnapshot,
+    bounds: Rect,
+    typography: &theme::Typography,
+) -> bool {
+    let Some(group) = layout
+        .aggregates
+        .iter()
+        .find(|group| group.parent_id == layout.root && group.depth == 1)
+    else {
+        return false;
     };
+    if layout.nodes.iter().any(|node| node.depth == 1) {
+        return false;
+    }
     painter.text(
-        rect.left_top() + egui::vec2(9.0, 8.0),
-        Align2::LEFT_TOP,
-        clipped,
-        FontId::proportional(if nested { 12.0 } else { 14.0 }),
-        if matches_filter {
-            theme::TEXT
-        } else {
-            theme::MUTED
-        },
+        bounds.center(),
+        Align2::CENTER_CENTER,
+        format!("Not enough room · {}", format_bytes(group.size)),
+        typography.font(theme::TypographyToken::DataNormal),
+        theme::TILE_MUTED,
     );
-    if rect.width() >= 126.0 && rect.height() >= 60.0 {
-        painter.text(
-            rect.left_top() + egui::vec2(9.0, if nested { 25.0 } else { 27.0 }),
-            Align2::LEFT_TOP,
-            format_bytes(if node.aggregated {
-                node.aggregate_size
-            } else {
-                index_node.map_or(0, |node| node.allocated)
-            }),
-            FontId::monospace(10.0),
-            theme::TILE_MUTED,
-        );
-    }
+    true
 }
 
 pub fn format_bytes(bytes: u64) -> String {
@@ -551,5 +958,59 @@ mod interaction_tests {
         assert_eq!(state.selected, Some(directory));
         assert_eq!(state.pinned, None);
         assert_eq!(state.aggregate, None);
+    }
+}
+
+#[cfg(test)]
+mod label_tests {
+    use super::*;
+
+    #[test]
+    fn compact_sizes_are_short_and_unit_boundary_candidates_are_all_measured() {
+        assert_eq!(compact_bytes(13 * 1024_u64.pow(3)), "13.0G");
+        assert_eq!(compact_bytes(820 * 1024_u64.pow(2)), "820M");
+        let labels = footprint_labels(
+            &[
+                717 * 1024_u64.pow(3),
+                700 * 1024_u64.pow(2),
+                323 * 1024_u64.pow(2),
+            ],
+            1,
+        );
+        assert!(labels.iter().any(|label| label == "1023M"));
+    }
+
+    #[test]
+    fn label_tiers_never_choose_name_only() {
+        let metrics = LabelMeasurements {
+            large_width: 120.0,
+            large_height: 36.0,
+            compact_width: 72.0,
+            compact_height: 30.0,
+            size_width: 38.0,
+            size_height: 14.0,
+        };
+        assert_eq!(
+            choose_label_tier([160.0, 50.0], metrics),
+            Some(LabelTier::Large)
+        );
+        assert_eq!(
+            choose_label_tier([90.0, 34.0], metrics),
+            Some(LabelTier::Compact)
+        );
+        assert_eq!(
+            choose_label_tier([45.0, 20.0], metrics),
+            Some(LabelTier::SizeOnly)
+        );
+        assert_eq!(choose_label_tier([30.0, 12.0], metrics), None);
+    }
+
+    #[test]
+    fn label_plan_key_rejects_snapshot_typography_or_bounds_drift() {
+        let key = LabelPlanKey::new(7, 3, SizeMode::Allocated, [900.0, 600.0]);
+        assert!(key.matches(7, 3, SizeMode::Allocated, [900.0, 600.0]));
+        assert!(!key.matches(8, 3, SizeMode::Allocated, [900.0, 600.0]));
+        assert!(!key.matches(7, 4, SizeMode::Allocated, [900.0, 600.0]));
+        assert!(!key.matches(7, 3, SizeMode::Allocated, [899.0, 600.0]));
     }
 }

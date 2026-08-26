@@ -959,6 +959,13 @@ impl VoidspaceApp {
                     self.details_drawer = true;
                 }
                 let available = ui.available_rect_before_wrap();
+                let metrics = treemap::candidate_metrics(
+                    ui,
+                    &tab.snapshot,
+                    tab.view_root,
+                    1024,
+                    &self.typography,
+                );
                 tab.layout = layout(
                     &tab.snapshot,
                     &ViewState {
@@ -972,7 +979,7 @@ impl VoidspaceApp {
                         size_mode: SizeMode::Allocated,
                         max_depth: 1,
                         min_area: 196.0,
-                        min_label: voidspace_layout::LabelFootprint::new(54.0, 22.0),
+                        min_label: metrics.footprint(),
                         max_rectangles: 1024,
                     },
                     &DirtySet::default(),
@@ -984,6 +991,8 @@ impl VoidspaceApp {
                     tab.selected,
                     self.filter.as_ref(),
                     tab.preview,
+                    &self.typography,
+                    &metrics,
                 );
                 if response.canvas_clicked {
                     tab.preview.apply_canvas_click(response.pin_clicked);
