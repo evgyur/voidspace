@@ -77,13 +77,13 @@ The size-only footprint is the minimum footprint supplied to layout. Tier choice
 
 ### Aggregation contract
 
-- Layout eligibility must include a minimum outer label footprint, not area alone. The app measures the compact size-only galley at the active DPI, then adds tile padding, both visual insets, and stroke allowance before passing the footprint to `voidspace-layout`. Preview header space is removed from the nested-layout bounds before this calculation is applied. A rectangle that satisfies the layout footprint must therefore still satisfy the renderer after clipping and insets.
+- Layout eligibility must include a minimum outer label footprint, not area alone. Before layout, the app compact-formats every candidate child size plus the saturating total positive child size (the largest possible `OTHER` value), measures those size-only galleys at the active DPI, and uses the maximum measured width. It then adds tile padding, both visual insets, and stroke allowance before passing the footprint to `voidspace-layout`. Preview header space is removed from nested-layout bounds before this calculation is applied. A rectangle that satisfies the layout footprint must therefore still satisfy every possible real or aggregate size label for that candidate set after clipping and insets.
 - Positive-size children are sorted deterministically by descending active size and then node ID. Layout chooses a prefix to keep. If any produced kept rectangle misses the outer footprint, it iteratively shortens that prefix and re-lays out until all kept rectangles fit. The remaining deterministic suffix is `OTHER`; arbitrary non-suffix membership is forbidden.
-- `max_rectangles` and any layout-budget limit also cap the kept prefix. Every omitted positive-size child, whether omitted for footprint or budget, belongs exactly once to the same `OTHER` suffix. Zero-size children in the active size mode are explicitly excluded from both visible tiles and `OTHER`.
+- `max_rectangles` is the global budget for emitted real, non-root, non-aggregate tiles. The structural root and at most one synthetic `OTHER` per laid-out parent do not consume this budget. Therefore `max_rectangles == 0` can still emit the root plus a labeled `OTHER`, and budget exhaustion never prevents the aggregate representation. The budget caps the deterministic kept prefix; every omitted positive-size child, whether omitted for footprint or budget, belongs exactly once to the same `OTHER` suffix. Zero-size children in the active size mode are explicitly excluded from both visible tiles and `OTHER`.
 - `OTHER` always displays its aggregate size, and displays its item count when the rectangle is large enough.
 - The layout output exposes the aggregate suffix boundary (`kept_count` or equivalent) together with count and size so aggregate details enumerate exactly the same sorted members; parent/count guessing is not an accepted interface.
 - The existing right-hand `OTHER` column direction remains unchanged.
-- Conservation invariant: the sum of active sizes for all emitted real children plus `OTHER.aggregate_size` equals the sum for all positive-size input children, even when `max_rectangles` is reached.
+- All aggregate and conservation arithmetic is saturating `u64`, matching index size storage. Conservation invariant: `saturating_sum(emitted real child active sizes) + OTHER.aggregate_size`, with a saturating addition, equals `saturating_sum(all positive-size input children)`, even when `max_rectangles` is reached. Exact member IDs/count remain exact even if the byte total saturates.
 - If the canvas can fit the minimum size-only footprint but no individual child can be kept, the view shows one labeled `OTHER` aggregate. If the canvas itself is smaller than that footprint, layout emits no child rectangle and the app shows a non-tile overflow message containing the root’s formatted size; it never emits an unlabeled rectangle.
 
 ## Components and boundaries
@@ -102,7 +102,7 @@ The size-only footprint is the minimum footprint supplied to layout. Tier choice
 
 ### `VoidspaceApp`
 
-- Owns persistent `view_path`, `view_root`, selection, and breadcrumb navigation.
+- Each `ScanTab` owns persistent `view_path`, `view_root`, selection, aggregate-detail state, and `PreviewState.pinned`. `treemap::show` receives the current preview state by value and returns an action; it never owns persistent pin state.
 - Applies zoom/back/breadcrumb transitions atomically and clears transient state consistently.
 - Keeps the inspector synchronized with the selected node.
 
@@ -119,7 +119,7 @@ The size-only footprint is the minimum footprint supplied to layout. Tier choice
 - Every visible hit rectangle receives a stable egui interaction overlay ID derived from tab/view root, real node ID, depth, and aggregate flag. It exposes `WidgetInfo::Button` containing node name, formatted active size, and expandable/aggregate state.
 - Tab moves focus between visible tile overlays. Enter or Space performs the same action as single click; Ctrl+Enter performs `Zoom` for an eligible directory. Escape performs `ClearPreview`. These keyboard activations flow through the same mutually exclusive action reducer as pointer input.
 - The navigation strip uses real egui buttons/links with keyboard focus.
-- Tooltip copy teaches the interaction succinctly: `Click: inspect · Double-click: zoom`.
+- Tooltip copy is capability-aware: expandable real directories show `Click: inspect · Double-click: zoom`; leaves show `Click: inspect`; `OTHER` shows `Click: inspect grouped items`.
 - The pinned state is communicated by both color/border and text, not color alone.
 
 ## Verification
@@ -133,13 +133,13 @@ The size-only footprint is the minimum footprint supplied to layout. Tier choice
 - Leaf and `OTHER` interactions never zoom.
 - `view_path` tests cover base zoom, nested direct zoom, one-level Back, direct ancestor breadcrumb, and invalidated live-update entries.
 - Layout emits no non-aggregate rectangle below the supplied label footprint.
-- Undersized and budget-exhausted positive children form one deterministic aggregate suffix and are included exactly once in `OTHER`, with exact membership boundary, count, and saturated size sum.
+- Undersized and budget-exhausted positive children form one deterministic aggregate suffix and are included exactly once in `OTHER`, with exact membership boundary/count and a saturated size sum. Tests include `max_rectangles == 0`, a budget that keeps one child, and arithmetic that reaches `u64::MAX`.
 - Size label tier selection uses measured post-inset bounds and covers large, compact, size-only, aggregate, and minimum-canvas overflow cases.
 
 ### Property and integration tests
 
 - Layout remains deterministic, contained, and non-overlapping with the new footprint constraint.
-- Active-size bytes represented by visible children plus `OTHER` equal the positive-size input child total for footprint and `max_rectangles` cases.
+- Saturating active-size bytes represented by visible children plus `OTHER` equal the saturating positive-size input child total for footprint and `max_rectangles` cases; separate membership assertions remain exact.
 - UI-state tests cover pin → nested select → nested zoom → parent Back, direct breadcrumb jumps, and live path repair.
 
 ### Manual release verification
