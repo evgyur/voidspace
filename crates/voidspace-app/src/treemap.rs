@@ -479,19 +479,54 @@ impl PreviewState {
 }
 
 pub struct TreemapResponse {
-    pub clicked: Option<NodeId>,
-    pub double_clicked: Option<NodeId>,
-    pub aggregate_clicked: Option<(NodeId, u32)>,
-    pub canvas_clicked: bool,
-    pub pin_clicked: Option<NodeId>,
+    pub action: Option<TreemapAction>,
+    pub aggregate_still_valid: bool,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Debug)]
 struct VisibleHit {
     node_id: NodeId,
     rect: Rect,
+    depth: u8,
     aggregated: bool,
-    aggregate_count: u32,
+    expandable: bool,
+    name: String,
+    formatted_size: String,
+    aggregate_members: Vec<NodeId>,
+}
+
+impl VisibleHit {
+    fn action_hit(&self) -> ActionHit {
+        if self.aggregated {
+            ActionHit::aggregate(self.node_id, self.depth, self.aggregate_members.clone())
+        } else if self.depth > 1 {
+            ActionHit::nested(self.node_id, self.expandable)
+        } else if self.expandable {
+            ActionHit::base_directory(self.node_id)
+        } else {
+            ActionHit::base_leaf(self.node_id)
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RenderedAggregate {
+    parent: NodeId,
+    depth: u8,
+    members: Vec<NodeId>,
+}
+
+fn aggregate_is_still_valid(
+    open_aggregate: Option<&AggregateSelection>,
+    rendered_aggregates: &[RenderedAggregate],
+) -> bool {
+    open_aggregate.is_none_or(|open| {
+        rendered_aggregates.iter().any(|rendered| {
+            rendered.parent == open.parent
+                && rendered.depth == open.depth
+                && rendered.members == open.members
+        })
+    })
 }
 
 pub fn show(
@@ -503,6 +538,7 @@ pub fn show(
     preview: PreviewState,
     typography: &theme::Typography,
     base_metrics: &CandidateMetrics,
+    open_aggregate: Option<&AggregateSelection>,
 ) -> TreemapResponse {
     let desired = ui.available_size();
     let (response, painter) = ui.allocate_painter(desired, Sense::click());
@@ -555,8 +591,23 @@ pub fn show(
     let active_preview = PreviewState {
         pinned: pinned_visible,
     }
-    .active(hovered_preview);
+    .active(hovered_preview)
+    .or_else(|| {
+        open_aggregate
+            .filter(|aggregate| aggregate.depth == 2)
+            .map(|aggregate| aggregate.parent)
+    });
 
+    let mut rendered_aggregates = base_layout
+        .aggregates
+        .iter()
+        .filter(|group| group.depth == 1)
+        .map(|group| RenderedAggregate {
+            parent: group.parent_id,
+            depth: 1,
+            members: group.member_ids.clone(),
+        })
+        .collect::<Vec<_>>();
     let mut base_hits = Vec::with_capacity(base_nodes.len());
     for (rank, node) in base_nodes.iter().enumerate() {
         let rect = visual_rect(node.rect, bounds);
@@ -572,6 +623,7 @@ pub fn show(
             selected,
             filter,
             active_preview == Some(node.node_id),
+            pinned_visible == Some(node.node_id),
             base_plan
                 .tiles
                 .get(&TileIdentity {
@@ -581,11 +633,26 @@ pub fn show(
                 })
                 .expect("layout emitted a tile without a measured label"),
         );
+        let label = base_plan
+            .tiles
+            .get(&TileIdentity {
+                node_id: node.node_id,
+                render_depth: 1,
+                aggregated: node.aggregated,
+            })
+            .expect("base hit has no label plan");
         base_hits.push(VisibleHit {
             node_id: node.node_id,
             rect,
+            depth: 1,
             aggregated: node.aggregated,
-            aggregate_count: node.aggregate_count,
+            expandable: !node.aggregated
+                && snapshot
+                    .node(node.node_id)
+                    .is_some_and(|entry| !entry.children.is_empty()),
+            name: tile_accessible_name(snapshot, node),
+            formatted_size: label.formatted_size.clone(),
+            aggregate_members: aggregate_members(base_layout, node.node_id),
         });
     }
 
@@ -597,6 +664,15 @@ pub fn show(
             .find(|node| node.node_id == preview_root && can_preview(snapshot, node))
     {
         let parent_rect = visual_rect(parent.rect, bounds);
+        if pinned_visible == Some(preview_root) {
+            painter.text(
+                parent_rect.right_top() + egui::vec2(-8.0, 8.0),
+                Align2::RIGHT_TOP,
+                "PINNED",
+                typography.font(theme::TypographyToken::DataMicro),
+                theme::LIME,
+            );
+        }
         let content = Rect::from_min_max(
             Pos2::new(
                 parent_rect.left() + TILE_GAP,
@@ -644,6 +720,17 @@ pub fn show(
                 [content.width(), content.height()],
             ));
             paint_layout_overflow(&painter, &nested_layout, content, typography);
+            rendered_aggregates.extend(
+                nested_layout
+                    .aggregates
+                    .iter()
+                    .filter(|group| group.depth == 1)
+                    .map(|group| RenderedAggregate {
+                        parent: group.parent_id,
+                        depth: 2,
+                        members: group.member_ids.clone(),
+                    }),
+            );
             for (rank, node) in nested_layout
                 .nodes
                 .iter()
@@ -663,6 +750,7 @@ pub fn show(
                     selected,
                     filter,
                     false,
+                    false,
                     nested_plan
                         .tiles
                         .get(&TileIdentity {
@@ -672,70 +760,125 @@ pub fn show(
                         })
                         .expect("nested layout emitted a tile without a measured label"),
                 );
+                let label = nested_plan
+                    .tiles
+                    .get(&TileIdentity {
+                        node_id: node.node_id,
+                        render_depth: 2,
+                        aggregated: node.aggregated,
+                    })
+                    .expect("nested hit has no label plan");
                 nested_hits.push(VisibleHit {
                     node_id: node.node_id,
                     rect,
+                    depth: 2,
                     aggregated: node.aggregated,
-                    aggregate_count: node.aggregate_count,
+                    expandable: !node.aggregated
+                        && snapshot
+                            .node(node.node_id)
+                            .is_some_and(|entry| !entry.children.is_empty()),
+                    name: tile_accessible_name(snapshot, node),
+                    formatted_size: label.formatted_size.clone(),
+                    aggregate_members: aggregate_members(&nested_layout, node.node_id),
                 });
             }
         }
     }
 
-    let interaction_position = response.interact_pointer_pos().or(pointer);
-    let hit = interaction_position.and_then(|position| {
-        nested_hits
-            .iter()
-            .rev()
-            .chain(base_hits.iter().rev())
-            .find(|hit| hit.rect.contains(position))
-            .copied()
-    });
-    let canvas_clicked = response.clicked() || response.double_clicked();
-    let pin_clicked = if canvas_clicked {
-        interaction_position.and_then(|position| {
-            active_preview
-                .filter(|preview_root| {
-                    base_nodes.iter().any(|node| {
-                        node.node_id == *preview_root
-                            && visual_rect(node.rect, bounds).contains(position)
-                    })
-                })
-                .or_else(|| {
-                    base_nodes
-                        .iter()
-                        .rev()
-                        .copied()
-                        .find(|node| {
-                            !node.aggregated
-                                && can_preview(snapshot, node)
-                                && visual_rect(node.rect, bounds).contains(position)
-                        })
-                        .map(|node| node.node_id)
-                })
-        })
-    } else {
-        None
-    };
+    let base_responses = hit_responses(ui, base_layout.root, base_hits);
+    let nested_responses = hit_responses(ui, base_layout.root, nested_hits);
+    let mut action = None;
+    for (hit, tile_response) in nested_responses
+        .iter()
+        .rev()
+        .chain(base_responses.iter().rev())
+    {
+        let keyboard_zoom = tile_response.has_focus()
+            && ui.input(|input| input.modifiers.ctrl && input.key_pressed(egui::Key::Enter));
+        let keyboard_activate = tile_response.has_focus()
+            && ui.input(|input| {
+                input.key_pressed(egui::Key::Enter) || input.key_pressed(egui::Key::Space)
+            });
+        let activation = if tile_response.double_clicked() {
+            Some(Activation::Double)
+        } else if keyboard_zoom {
+            Some(Activation::KeyboardZoom)
+        } else if tile_response.clicked() || keyboard_activate {
+            Some(Activation::Single)
+        } else {
+            None
+        };
+        if let Some(activation) = activation {
+            action = Some(action_for_hit(&hit.action_hit(), activation));
+            break;
+        }
+    }
+    if action.is_none()
+        && (response.clicked() || ui.input(|input| input.key_pressed(egui::Key::Escape)))
+    {
+        action = Some(TreemapAction::ClearPreview);
+    }
 
     TreemapResponse {
-        clicked: response
-            .clicked()
-            .then_some(hit.map(|hit| hit.node_id))
-            .flatten(),
-        double_clicked: response
-            .double_clicked()
-            .then_some(hit.filter(|hit| !hit.aggregated).map(|hit| hit.node_id))
-            .flatten(),
-        aggregate_clicked: canvas_clicked
-            .then_some(
-                hit.filter(|hit| hit.aggregated)
-                    .map(|hit| (hit.node_id, hit.aggregate_count)),
-            )
-            .flatten(),
-        canvas_clicked,
-        pin_clicked,
+        action,
+        aggregate_still_valid: aggregate_is_still_valid(open_aggregate, &rendered_aggregates),
     }
+}
+
+fn hit_responses(
+    ui: &mut Ui,
+    root: NodeId,
+    hits: Vec<VisibleHit>,
+) -> Vec<(VisibleHit, egui::Response)> {
+    hits.into_iter()
+        .map(|hit| {
+            let response = ui.interact(
+                hit.rect,
+                ui.id().with((root, hit.node_id, hit.depth, hit.aggregated)),
+                Sense::click(),
+            );
+            response.widget_info(|| {
+                egui::WidgetInfo::labeled(
+                    egui::WidgetType::Button,
+                    true,
+                    format!(
+                        "{} · {}{}",
+                        hit.name,
+                        hit.formatted_size,
+                        if hit.expandable { " · expandable" } else { "" }
+                    ),
+                )
+            });
+            let hint = if hit.aggregated {
+                "Click: inspect grouped items"
+            } else if hit.expandable {
+                "Click: inspect · Double-click: zoom"
+            } else {
+                "Click: inspect"
+            };
+            (hit, response.on_hover_text(hint))
+        })
+        .collect()
+}
+
+fn tile_accessible_name(snapshot: &IndexSnapshot, node: &LayoutNode) -> String {
+    if node.aggregated {
+        format!("OTHER · {} ITEMS", node.aggregate_count)
+    } else {
+        snapshot
+            .node(node.node_id)
+            .map(|entry| entry.name.display_escaped())
+            .unwrap_or_else(|| "?".to_owned())
+    }
+}
+
+fn aggregate_members(layout: &LayoutSnapshot, parent: NodeId) -> Vec<NodeId> {
+    layout
+        .aggregates
+        .iter()
+        .find(|group| group.parent_id == parent && group.depth == 1)
+        .map(|group| group.member_ids.clone())
+        .unwrap_or_default()
 }
 
 fn can_preview(snapshot: &IndexSnapshot, node: &LayoutNode) -> bool {
@@ -766,6 +909,7 @@ fn paint_tile(
     selected: Option<NodeId>,
     filter: Option<&Expr>,
     preview_active: bool,
+    preview_pinned: bool,
     label: &TileLabelPlan,
 ) {
     let index_node = snapshot.node(node.node_id);
@@ -793,6 +937,8 @@ fn paint_tile(
     };
     let border = if selected == Some(node.node_id) {
         theme::ORANGE
+    } else if preview_pinned {
+        theme::LIME
     } else {
         blend(accent, theme::LINE, 0.58)
     };
@@ -814,6 +960,7 @@ fn paint_tile(
     debug_assert_eq!(label.identity.node_id, node.node_id);
     debug_assert!(!label.formatted_size.is_empty());
     debug_assert!(label.inner_rect.contains(label.size_pos));
+    let _measured_size_font = &label.size_font;
     match label.tier {
         LabelTier::Large | LabelTier::Compact => {
             debug_assert!(label.final_name.is_some());
@@ -1012,5 +1159,41 @@ mod label_tests {
         assert!(!key.matches(8, 3, SizeMode::Allocated, [900.0, 600.0]));
         assert!(!key.matches(7, 4, SizeMode::Allocated, [900.0, 600.0]));
         assert!(!key.matches(7, 3, SizeMode::Allocated, [899.0, 600.0]));
+    }
+}
+
+#[cfg(test)]
+mod aggregate_validity_tests {
+    use super::*;
+
+    #[test]
+    fn only_exact_ordered_aggregate_membership_remains_valid() {
+        let open = AggregateSelection {
+            parent: NodeId(2),
+            depth: 1,
+            members: vec![NodeId(9), NodeId(10)],
+        };
+        let exact = RenderedAggregate {
+            parent: NodeId(2),
+            depth: 1,
+            members: vec![NodeId(9), NodeId(10)],
+        };
+        assert!(aggregate_is_still_valid(Some(&open), &[exact.clone()]));
+        assert!(!aggregate_is_still_valid(
+            Some(&open),
+            &[RenderedAggregate {
+                members: vec![NodeId(10), NodeId(9)],
+                ..exact.clone()
+            }]
+        ));
+        assert!(!aggregate_is_still_valid(
+            Some(&open),
+            &[RenderedAggregate {
+                depth: 2,
+                ..exact.clone()
+            }]
+        ));
+        assert!(!aggregate_is_still_valid(Some(&open), &[]));
+        assert!(aggregate_is_still_valid(None, &[]));
     }
 }

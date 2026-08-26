@@ -159,3 +159,26 @@ fn live_repair_truncates_at_the_first_broken_internal_link() {
     );
     assert_eq!(state.view_path.as_slice(), &[NodeId(1), NodeId(2)]);
 }
+
+#[test]
+fn pin_nested_zoom_back_and_breadcrumb_share_one_path() {
+    let root = NodeId(1);
+    let base = NodeId(2);
+    let nested = NodeId(3);
+    let mut state = TreemapState::new(root);
+    state.apply(TreemapAction::ActivateBaseDirectory(base));
+    state.apply(TreemapAction::ActivateNested(nested));
+    state
+        .view_path
+        .rebuild(nested, |id| match id {
+            NodeId(2) => Some(root),
+            NodeId(3) => Some(base),
+            _ => None,
+        })
+        .unwrap();
+    state.apply(TreemapAction::Zoom(nested));
+
+    assert_eq!(state.view_path.back(), Some(base));
+    assert_eq!(state.view_path.jump_to(root), Some(root));
+    assert_eq!(state.view_path.as_slice(), &[root]);
+}

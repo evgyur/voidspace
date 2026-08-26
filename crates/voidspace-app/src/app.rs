@@ -18,6 +18,7 @@ use voidspace_scan::{ScanHandle, ScanRequest, describe_root, start};
 use voidspace_watch::{WatchHandle, WatchRequest, WatchSignal, watch};
 
 use crate::{
+    TreemapAction, TreemapState, ViewPath,
     settings::Settings,
     theme, treemap, volume,
     volume_switcher::{self, VolumeRootKey, VolumeSwitcherAction, VolumeSwitcherState},
@@ -59,15 +60,49 @@ struct ScanTab {
     scanning: bool,
     paused: bool,
     files_seen: u64,
-    selected: Option<NodeId>,
-    view_root: NodeId,
-    history: Vec<NodeId>,
+    treemap_state: TreemapState,
     pending_rescan: bool,
     last_watch_event: Option<Instant>,
     errors: Vec<String>,
-    show_other_for: Option<(NodeId, u32)>,
-    preview: treemap::PreviewState,
     volume_usage: Option<volume::VolumeUsage>,
+}
+
+impl ScanTab {
+    fn apply_treemap_action(&mut self, action: TreemapAction) {
+        match action {
+            TreemapAction::Zoom(target) => {
+                if self
+                    .snapshot
+                    .node(target)
+                    .is_some_and(|node| !node.children.is_empty())
+                {
+                    let root = self.snapshot.root;
+                    if self
+                        .treemap_state
+                        .view_path
+                        .rebuild(target, |id| {
+                            self.snapshot.node(id).and_then(|node| node.parent)
+                        })
+                        .is_none()
+                    {
+                        self.treemap_state.view_path = ViewPath::root(root);
+                        self.errors
+                            .push("Cannot build breadcrumb path for zoom target".into());
+                        return;
+                    }
+                    self.treemap_state.apply(TreemapAction::Zoom(target));
+                }
+            }
+            other => self.treemap_state.apply(other),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NavigationIntent {
+    None,
+    Back,
+    Jump(NodeId),
 }
 
 enum InspectorAction {
@@ -243,7 +278,7 @@ impl VoidspaceApp {
             title,
             root_path,
             generation,
-            view_root: snapshot.root,
+            treemap_state: TreemapState::new(snapshot.root),
             index,
             snapshot,
             layout,
@@ -254,13 +289,9 @@ impl VoidspaceApp {
             scanning: true,
             paused: false,
             files_seen: 0,
-            selected: None,
-            history: Vec::new(),
             pending_rescan: false,
             last_watch_event: None,
             errors: Vec::new(),
-            show_other_for: None,
-            preview: treemap::PreviewState::default(),
             volume_usage,
         });
         self.active_tab = self.tabs.len() - 1;
@@ -356,6 +387,11 @@ impl VoidspaceApp {
             }
             if !dirty.is_empty() {
                 tab.snapshot = tab.index.snapshot();
+                let snapshot = &tab.snapshot;
+                tab.treemap_state.repair(
+                    |id| snapshot.node(id).is_some(),
+                    |id| snapshot.node(id).and_then(|node| node.parent),
+                );
             }
             if tab.scanning || !dirty.is_empty() {
                 context.request_repaint_after(Duration::from_millis(16));
@@ -391,10 +427,7 @@ impl VoidspaceApp {
             root.name,
         );
         tab.snapshot = tab.index.snapshot();
-        tab.view_root = tab.snapshot.root;
-        tab.selected = None;
-        tab.show_other_for = None;
-        tab.preview.clear();
+        tab.treemap_state = TreemapState::new(tab.snapshot.root);
         tab.volume_usage = volume::query(&tab.root_path);
         let (event_tx, event_rx) = bounded(65_536);
         tab.events = event_rx;
@@ -604,6 +637,8 @@ impl VoidspaceApp {
 
     fn inspector(ui: &mut egui::Ui, tab: &mut ScanTab) -> Option<InspectorAction> {
         let mut action = None;
+        let mut treemap_action = None;
+        let mut navigation = NavigationIntent::None;
         ui.label(
             egui::RichText::new("OBJECT / 01")
                 .monospace()
@@ -611,7 +646,10 @@ impl VoidspaceApp {
                 .color(theme::MUTED),
         );
         ui.add_space(8.0);
-        let selected = tab.selected.unwrap_or(tab.view_root);
+        let selected = tab
+            .treemap_state
+            .selected
+            .unwrap_or_else(|| tab.treemap_state.view_path.current());
         if let Some(node) = tab.snapshot.node(selected) {
             ui.heading(node.name.display_escaped());
             let selected_path = path_for_node(tab, selected);
@@ -680,17 +718,16 @@ impl VoidspaceApp {
                     .add_enabled(!node.children.is_empty(), egui::Button::new("ZOOM INTO"))
                     .clicked()
                 {
-                    tab.history.push(tab.view_root);
-                    tab.view_root = selected;
-                    tab.preview.clear();
+                    treemap_action = Some(TreemapAction::Zoom(selected));
                 }
                 if ui
-                    .add_enabled(!tab.history.is_empty(), egui::Button::new("BACK"))
+                    .add_enabled(
+                        tab.treemap_state.view_path.as_slice().len() > 1,
+                        egui::Button::new("BACK"),
+                    )
                     .clicked()
-                    && let Some(previous) = tab.history.pop()
                 {
-                    tab.view_root = previous;
-                    tab.preview.clear();
+                    navigation = NavigationIntent::Back;
                 }
             });
             ui.add_space(16.0);
@@ -780,34 +817,28 @@ impl VoidspaceApp {
                     .color(theme::MUTED),
             );
             ui.add_space(10.0);
-            if let Some((other_parent, other_count)) = tab.show_other_for
-                && other_parent == selected
-            {
+            if let Some(group) = &tab.treemap_state.aggregate {
                 ui.separator();
                 ui.label(
                     egui::RichText::new("OTHER · SMALL ITEMS")
                         .strong()
                         .color(theme::ORANGE),
                 );
-                let mut children: Vec<_> = node
-                    .children
-                    .iter()
-                    .filter_map(|child| tab.snapshot.node(*child))
-                    .collect();
-                children.sort_by_key(|child| child.allocated);
                 egui::ScrollArea::vertical()
                     .max_height(220.0)
                     .show(ui, |ui| {
-                        for child in children.into_iter().take(other_count as usize) {
-                            ui.horizontal(|ui| {
-                                ui.label(child.name.display_escaped());
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        ui.monospace(treemap::format_bytes(child.allocated));
-                                    },
-                                );
-                            });
+                        for child_id in &group.members {
+                            if let Some(child) = tab.snapshot.node(*child_id) {
+                                ui.horizontal(|ui| {
+                                    ui.label(child.name.display_escaped());
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            ui.monospace(treemap::format_bytes(child.allocated));
+                                        },
+                                    );
+                                });
+                            }
                         }
                     });
             }
@@ -819,6 +850,10 @@ impl VoidspaceApp {
                 ui.label(egui::RichText::new(error).small().color(theme::MUTED));
             }
         }
+        if let Some(treemap_action) = treemap_action {
+            tab.apply_treemap_action(treemap_action);
+        }
+        apply_navigation(tab, navigation);
         action
     }
 
@@ -958,18 +993,27 @@ impl VoidspaceApp {
                 if mode == WorkspaceMode::DrawerClosed && ui.button("DETAILS").clicked() {
                     self.details_drawer = true;
                 }
+                if ui.ctx().input_mut(|input| {
+                    input.consume_key(egui::Modifiers::ALT, egui::Key::ArrowLeft)
+                }) {
+                    apply_navigation(tab, NavigationIntent::Back);
+                }
+                let navigation = treemap_navigation(ui, tab);
+                apply_navigation(tab, navigation);
+                ui.separator();
+                let view_root = tab.treemap_state.view_path.current();
                 let available = ui.available_rect_before_wrap();
                 let metrics = treemap::candidate_metrics(
                     ui,
                     &tab.snapshot,
-                    tab.view_root,
+                    view_root,
                     1024,
                     &self.typography,
                 );
                 tab.layout = layout(
                     &tab.snapshot,
                     &ViewState {
-                        root: tab.view_root,
+                        root: view_root,
                         bounds: LayoutRect::new(
                             available.left(),
                             available.top(),
@@ -984,33 +1028,41 @@ impl VoidspaceApp {
                     },
                     &DirtySet::default(),
                 );
+                let pin_is_eligible = tab.treemap_state.pinned.is_some_and(|pinned| {
+                    tab.layout.nodes.iter().any(|node| {
+                        node.depth == 1
+                            && !node.aggregated
+                            && node.node_id == pinned
+                            && node.rect.width() >= 150.0
+                            && node.rect.height() >= 100.0
+                            && tab
+                                .snapshot
+                                .node(pinned)
+                                .is_some_and(|entry| !entry.children.is_empty())
+                    })
+                });
+                if tab.treemap_state.pinned.is_some() && !pin_is_eligible {
+                    tab.treemap_state.pinned = None;
+                }
+                let preview = treemap::PreviewState {
+                    pinned: tab.treemap_state.pinned,
+                };
                 let response = treemap::show(
                     ui,
                     &tab.snapshot,
                     &tab.layout,
-                    tab.selected,
+                    tab.treemap_state.selected,
                     self.filter.as_ref(),
-                    tab.preview,
+                    preview,
                     &self.typography,
                     &metrics,
+                    tab.treemap_state.aggregate.as_ref(),
                 );
-                if response.canvas_clicked {
-                    tab.preview.apply_canvas_click(response.pin_clicked);
+                if !response.aggregate_still_valid {
+                    tab.treemap_state.aggregate = None;
                 }
-                if let Some(selected) = response.clicked {
-                    tab.selected = Some(selected);
-                    tab.show_other_for = response.aggregate_clicked;
-                }
-                if let Some(selected) = response.double_clicked
-                    && tab
-                        .snapshot
-                        .node(selected)
-                        .is_some_and(|node| !node.children.is_empty())
-                {
-                    tab.history.push(tab.view_root);
-                    tab.view_root = selected;
-                    tab.selected = Some(selected);
-                    tab.preview.clear();
+                if let Some(action) = response.action {
+                    tab.apply_treemap_action(action);
                 }
             });
 
@@ -1230,6 +1282,57 @@ fn apply_volume_refresh(
             *error = None;
         }
         Err(refresh_error) => *error = Some(refresh_error),
+    }
+}
+
+fn treemap_navigation(ui: &mut egui::Ui, tab: &ScanTab) -> NavigationIntent {
+    let mut intent = NavigationIntent::None;
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(
+                tab.treemap_state.view_path.as_slice().len() > 1,
+                egui::Button::new("← BACK"),
+            )
+            .clicked()
+        {
+            intent = NavigationIntent::Back;
+        }
+        for (index, node_id) in tab
+            .treemap_state
+            .view_path
+            .as_slice()
+            .iter()
+            .copied()
+            .enumerate()
+        {
+            if index > 0 {
+                ui.label(egui::RichText::new("›").color(theme::MUTED));
+            }
+            let label = tab
+                .snapshot
+                .node(node_id)
+                .map(|node| node.name.display_escaped())
+                .unwrap_or_else(|| "?".into());
+            if index + 1 == tab.treemap_state.view_path.as_slice().len() {
+                ui.label(egui::RichText::new(label).color(theme::ORANGE).strong());
+            } else if ui.link(label).clicked() {
+                intent = NavigationIntent::Jump(node_id);
+            }
+        }
+    });
+    intent
+}
+
+fn apply_navigation(tab: &mut ScanTab, intent: NavigationIntent) {
+    let target = match intent {
+        NavigationIntent::None => None,
+        NavigationIntent::Back => tab.treemap_state.view_path.back(),
+        NavigationIntent::Jump(node_id) => tab.treemap_state.view_path.jump_to(node_id),
+    };
+    if let Some(target) = target {
+        tab.treemap_state.selected = Some(target);
+        tab.treemap_state.pinned = None;
+        tab.treemap_state.aggregate = None;
     }
 }
 
