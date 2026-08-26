@@ -2,7 +2,7 @@ use std::io::Cursor;
 
 use voidspace_elevated::{
     MAX_FRAME_BYTES, PROTOCOL_VERSION, PeerClaim, ProtocolError, ProtocolGuard, Request, RequestId,
-    RequestKind, read_frame, write_frame,
+    RequestKind, read_frame, windows_command_line, write_frame,
 };
 
 fn peer() -> PeerClaim {
@@ -20,6 +20,18 @@ fn turbo_negotiation_is_explicit_about_safe_fallback() {
         voidspace_elevated::turbo_mode_for(std::path::Path::new(r"C:\")),
         voidspace_elevated::TurboMode::PrivilegedTraversalFallback { .. }
     ));
+}
+
+#[test]
+fn windows_command_line_preserves_a_drive_root_and_spaced_paths() {
+    assert_eq!(
+        windows_command_line(&["--turbo", "--scan", r"C:\"]),
+        r#""--turbo" "--scan" "C:\\""#
+    );
+    assert_eq!(
+        windows_command_line(&["--scan", r"C:\Folder With Spaces\"]),
+        r#""--scan" "C:\Folder With Spaces\\""#
+    );
 }
 
 fn request(id: u64, sequence: u64) -> Request {

@@ -21,6 +21,11 @@ use crate::{settings::Settings, theme, treemap, volume};
 
 const MAX_SCAN_EVENTS_PER_FRAME: usize = 2_048;
 const MAX_SCAN_WORK_PER_FRAME: Duration = Duration::from_millis(5);
+const VOLUME_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
+const VOLUME_CARD_MIN_WIDTH: f32 = 280.0;
+const VOLUME_CARD_HEIGHT: f32 = 148.0;
+const VOLUME_CARD_GAP: f32 = 16.0;
+const VOLUME_GRID_MAX_WIDTH: f32 = 1_280.0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkspaceMode {
@@ -94,6 +99,13 @@ pub struct VoidspaceApp {
     fileop_tx: Sender<Result<OperationReport, String>>,
     fileop_rx: Receiver<Result<OperationReport, String>>,
     fileop_running: bool,
+    volume_refresh_tx: Sender<Result<Vec<volume::VolumeInfo>, String>>,
+    volume_refresh_rx: Receiver<Result<Vec<volume::VolumeInfo>, String>>,
+    available_volumes: Vec<volume::VolumeInfo>,
+    volume_refresh_started_at: Instant,
+    volume_refresh_in_flight: bool,
+    volume_discovery_complete: bool,
+    volume_discovery_error: Option<String>,
     turbo_session: bool,
     settings: Settings,
 }
@@ -104,6 +116,7 @@ impl VoidspaceApp {
         let settings = Settings::load();
         let default_scope = settings.last_scope.clone();
         let (fileop_tx, fileop_rx) = bounded(4);
+        let (volume_refresh_tx, volume_refresh_rx) = bounded(1);
         let mut app = Self {
             tabs: Vec::new(),
             active_tab: 0,
@@ -118,6 +131,13 @@ impl VoidspaceApp {
             fileop_tx,
             fileop_rx,
             fileop_running: false,
+            volume_refresh_tx,
+            volume_refresh_rx,
+            available_volumes: Vec::new(),
+            volume_refresh_started_at: Instant::now(),
+            volume_refresh_in_flight: false,
+            volume_discovery_complete: false,
+            volume_discovery_error: None,
             turbo_session: std::env::args().any(|argument| argument == "--turbo"),
             settings,
         };
@@ -128,7 +148,24 @@ impl VoidspaceApp {
             app.scope_text = scope.clone();
             app.start_scan(PathBuf::from(scope));
         }
+        if app.tabs.is_empty() {
+            app.request_volume_refresh(&context.egui_ctx);
+        }
         app
+    }
+
+    fn request_volume_refresh(&mut self, context: &egui::Context) {
+        if self.volume_refresh_in_flight || !self.tabs.is_empty() {
+            return;
+        }
+        self.volume_refresh_in_flight = true;
+        self.volume_refresh_started_at = Instant::now();
+        let sink = self.volume_refresh_tx.clone();
+        let context = context.clone();
+        std::thread::spawn(move || {
+            let _ = sink.send(volume::list());
+            context.request_repaint();
+        });
     }
 
     fn start_scan(&mut self, root_path: PathBuf) {
@@ -206,6 +243,23 @@ impl VoidspaceApp {
     }
 
     fn update_workers(&mut self, context: &egui::Context) {
+        while let Ok(result) = self.volume_refresh_rx.try_recv() {
+            self.volume_refresh_in_flight = false;
+            self.volume_discovery_complete = true;
+            apply_volume_refresh(
+                &mut self.available_volumes,
+                &mut self.volume_discovery_error,
+                result,
+            );
+        }
+        if self.tabs.is_empty() {
+            let elapsed = self.volume_refresh_started_at.elapsed();
+            if !self.volume_refresh_in_flight && elapsed >= VOLUME_REFRESH_INTERVAL {
+                self.request_volume_refresh(context);
+            } else if !self.volume_refresh_in_flight {
+                context.request_repaint_after(VOLUME_REFRESH_INTERVAL.saturating_sub(elapsed));
+            }
+        }
         while let Ok(result) = self.fileop_rx.try_recv() {
             self.fileop_running = false;
             match result {
@@ -707,25 +761,107 @@ impl VoidspaceApp {
 
     fn workspace(&mut self, root_ui: &mut egui::Ui) {
         if self.tabs.is_empty() {
+            let mut scan_root = None;
             egui::CentralPanel::default()
                 .frame(egui::Frame::new().fill(theme::BG))
                 .show(root_ui, |ui| {
-                    ui.centered_and_justified(|ui| {
-                        ui.vertical_centered(|ui| {
-                            ui.label(
-                                egui::RichText::new("SEE WHERE THE SPACE WENT.")
-                                    .size(32.0)
-                                    .strong()
-                                    .color(theme::TEXT),
-                            );
-                            ui.label(
-                                egui::RichText::new("Choose a folder or volume, then scan.")
-                                    .size(15.0)
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        ui.add_space(42.0);
+                        let available_width = ui.available_width();
+                        let content_width = available_width.min(VOLUME_GRID_MAX_WIDTH);
+                        let side_space = ((available_width - content_width) / 2.0).max(0.0);
+                        ui.horizontal(|ui| {
+                            ui.add_space(side_space);
+                            ui.vertical(|ui| {
+                                ui.set_width(content_width);
+                                ui.label(
+                                    egui::RichText::new("STORAGE / WINDOWS")
+                                        .monospace()
+                                        .size(10.0)
+                                        .color(theme::ORANGE),
+                                );
+                                ui.add_space(8.0);
+                                ui.label(
+                                    egui::RichText::new("CHOOSE A VOLUME")
+                                        .size(30.0)
+                                        .strong()
+                                        .color(theme::TEXT),
+                                );
+                                ui.label(
+                                    egui::RichText::new(
+                                        "Select a disk to start scanning. Mounted volumes refresh automatically.",
+                                    )
+                                    .size(14.0)
                                     .color(theme::MUTED),
-                            );
+                                );
+                                ui.add_space(26.0);
+
+                                if self.available_volumes.is_empty() {
+                                    let (title, detail) = if !self.volume_discovery_complete {
+                                        (
+                                            "DETECTING VOLUMES",
+                                            "Reading mounted Windows disks…",
+                                        )
+                                    } else if self.volume_discovery_error.is_some() {
+                                        (
+                                            "VOLUME DISCOVERY FAILED",
+                                            "Use the path field above to scan a disk or folder.",
+                                        )
+                                    } else {
+                                        (
+                                            "NO READY VOLUMES",
+                                            "Use the path field above to scan a disk or folder.",
+                                        )
+                                    };
+                                    empty_volume_message(ui, title, detail);
+                                } else {
+                                    let columns = volume_grid_columns(content_width);
+                                    let card_width = (content_width
+                                        - VOLUME_CARD_GAP * (columns.saturating_sub(1) as f32))
+                                        / columns as f32;
+                                    egui::Grid::new("volume_picker_grid")
+                                        .num_columns(columns)
+                                        .spacing([VOLUME_CARD_GAP, VOLUME_CARD_GAP])
+                                        .show(ui, |ui| {
+                                            for (index, volume) in
+                                                self.available_volumes.iter().enumerate()
+                                            {
+                                                if volume_card(ui, volume, card_width) {
+                                                    scan_root = Some(volume.root_path.clone());
+                                                }
+                                                if (index + 1) % columns == 0 {
+                                                    ui.end_row();
+                                                }
+                                            }
+                                        });
+                                    if let Some(error) = &self.volume_discovery_error {
+                                        ui.add_space(10.0);
+                                        ui.label(
+                                            egui::RichText::new(format!(
+                                                "LAST REFRESH ISSUE · {error}"
+                                            ))
+                                            .monospace()
+                                            .size(10.0)
+                                            .color(theme::MUTED),
+                                        );
+                                    }
+                                }
+                                ui.add_space(22.0);
+                                ui.label(
+                                    egui::RichText::new(
+                                        "Need a folder instead? Enter its path in the field above and press Enter.",
+                                    )
+                                    .size(12.0)
+                                    .color(theme::MUTED),
+                                );
+                            });
                         });
                     });
                 });
+            if let Some(root) = scan_root {
+                self.scope_text = root.display().to_string();
+                self.start_scan(root);
+            }
             return;
         }
 
@@ -935,8 +1071,7 @@ impl VoidspaceApp {
     fn launch_turbo(&mut self) {
         match std::env::current_exe() {
             Ok(executable) => {
-                let scope = self.scope_text.replace('"', "");
-                let arguments = format!("--turbo --scan \"{scope}\"");
+                let arguments = ["--turbo", "--scan", self.scope_text.trim()];
                 match voidspace_elevated::launch_elevated(&executable, &arguments) {
                     Ok(()) => {
                         self.toast = Some("Launching privileged Turbo traversal through UAC".into())
@@ -1023,6 +1158,180 @@ impl VoidspaceApp {
     }
 }
 
+fn apply_volume_refresh(
+    cache: &mut Vec<volume::VolumeInfo>,
+    error: &mut Option<String>,
+    result: Result<Vec<volume::VolumeInfo>, String>,
+) {
+    match result {
+        Ok(volumes) => {
+            *cache = volumes;
+            *error = None;
+        }
+        Err(refresh_error) => *error = Some(refresh_error),
+    }
+}
+
+fn volume_grid_columns(available_width: f32) -> usize {
+    (((available_width + VOLUME_CARD_GAP) / (VOLUME_CARD_MIN_WIDTH + VOLUME_CARD_GAP)).floor()
+        as usize)
+        .clamp(1, 4)
+}
+
+fn truncate_volume_label(label: &str, max_characters: usize) -> String {
+    if label.chars().count() <= max_characters {
+        return label.to_owned();
+    }
+    let visible = max_characters.saturating_sub(1);
+    format!("{}…", label.chars().take(visible).collect::<String>())
+}
+
+fn empty_volume_message(ui: &mut egui::Ui, title: &str, detail: &str) {
+    egui::Frame::new()
+        .fill(theme::SURFACE)
+        .stroke(egui::Stroke::new(1.0, theme::LINE))
+        .inner_margin(egui::Margin::same(22))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(
+                egui::RichText::new(title)
+                    .monospace()
+                    .strong()
+                    .color(theme::TEXT),
+            );
+            ui.label(egui::RichText::new(detail).color(theme::MUTED));
+        });
+}
+
+fn volume_card(ui: &mut egui::Ui, volume: &volume::VolumeInfo, width: f32) -> bool {
+    use egui::{Align2, FontFamily, FontId, Sense, StrokeKind, WidgetInfo, WidgetType};
+
+    let (mut response, painter) =
+        ui.allocate_painter(egui::vec2(width, VOLUME_CARD_HEIGHT), Sense::click());
+    let keyboard_activated = response.has_focus()
+        && ui.input(|input| {
+            input.key_pressed(egui::Key::Enter) || input.key_pressed(egui::Key::Space)
+        });
+    if keyboard_activated {
+        response.mark_changed();
+    }
+
+    let used = volume.usage.used();
+    let percentage = volume::used_percentage(volume.usage);
+    let accessible_label = format!(
+        "{} {}, total {}, free {}",
+        volume.display_root,
+        volume.label,
+        volume::format_decimal_bytes(volume.usage.total),
+        volume::format_decimal_bytes(volume.usage.free),
+    );
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, &accessible_label));
+
+    let rect = response.rect;
+    let highlighted = response.hovered() || response.has_focus();
+    let fill = if response.is_pointer_button_down_on() {
+        egui::Color32::from_rgb(27, 23, 21)
+    } else if highlighted {
+        theme::RAISED
+    } else {
+        theme::SURFACE
+    };
+    painter.rect_filled(rect, 3.0, fill);
+    painter.rect_stroke(
+        rect,
+        3.0,
+        egui::Stroke::new(
+            if response.has_focus() { 2.0 } else { 1.0 },
+            if highlighted {
+                theme::ORANGE
+            } else {
+                theme::LINE
+            },
+        ),
+        StrokeKind::Inside,
+    );
+
+    let inner = rect.shrink(18.0);
+    let proportional = |size| FontId::new(size, FontFamily::Proportional);
+    let monospace = |size| FontId::new(size, FontFamily::Monospace);
+    painter.text(
+        inner.left_top(),
+        Align2::LEFT_TOP,
+        &volume.display_root,
+        proportional(27.0),
+        theme::ORANGE,
+    );
+    painter.text(
+        inner.right_top(),
+        Align2::RIGHT_TOP,
+        volume::format_decimal_bytes(volume.usage.total),
+        monospace(14.0),
+        theme::TEXT,
+    );
+    painter.text(
+        egui::pos2(inner.right(), inner.top() + 20.0),
+        Align2::RIGHT_TOP,
+        "TOTAL",
+        monospace(9.0),
+        theme::MUTED,
+    );
+
+    let max_label_characters = ((inner.width() / 7.5).floor() as usize).clamp(12, 42);
+    painter.text(
+        egui::pos2(inner.left(), inner.top() + 37.0),
+        Align2::LEFT_TOP,
+        truncate_volume_label(&volume.label, max_label_characters),
+        proportional(13.0),
+        theme::TEXT,
+    );
+    painter.text(
+        egui::pos2(inner.left(), inner.top() + 61.0),
+        Align2::LEFT_TOP,
+        format!("{percentage}% USED"),
+        monospace(10.0),
+        theme::MUTED,
+    );
+
+    let track = egui::Rect::from_min_max(
+        egui::pos2(inner.left(), inner.top() + 82.0),
+        egui::pos2(inner.right(), inner.top() + 90.0),
+    );
+    painter.rect_filled(track, 1.0, theme::LINE);
+    let used_width = track.width() * volume::used_ratio(volume.usage);
+    if used_width > 0.0 {
+        painter.rect_filled(
+            egui::Rect::from_min_size(track.min, egui::vec2(used_width, track.height())),
+            1.0,
+            theme::ORANGE,
+        );
+    }
+
+    painter.text(
+        egui::pos2(inner.left(), inner.top() + 105.0),
+        Align2::LEFT_TOP,
+        format!("USED {}", volume::format_decimal_bytes(used)),
+        monospace(10.0),
+        theme::TILE_MUTED,
+    );
+    painter.text(
+        egui::pos2(inner.right(), inner.top() + 105.0),
+        Align2::RIGHT_TOP,
+        format!("FREE {}", volume::format_decimal_bytes(volume.usage.free)),
+        monospace(10.0),
+        theme::TILE_MUTED,
+    );
+
+    let activated = response.clicked() || keyboard_activated;
+    response.on_hover_text(format!(
+        "{} · {}\n{} total · {} free",
+        volume.display_root,
+        volume.label,
+        volume::format_decimal_bytes(volume.usage.total),
+        volume::format_decimal_bytes(volume.usage.free),
+    ));
+    activated
+}
+
 fn scan_batch_exhausted(processed: usize, elapsed: Duration) -> bool {
     processed > 0 && elapsed >= MAX_SCAN_WORK_PER_FRAME
 }
@@ -1091,5 +1400,54 @@ mod worker_budget_tests {
             1,
             MAX_SCAN_WORK_PER_FRAME - Duration::from_nanos(1)
         ));
+    }
+}
+
+#[cfg(test)]
+mod volume_picker_tests {
+    use std::path::PathBuf;
+
+    use super::{apply_volume_refresh, truncate_volume_label, volume_grid_columns};
+    use crate::volume::{VolumeInfo, VolumeUsage};
+
+    fn volume(root: &str) -> VolumeInfo {
+        VolumeInfo {
+            root_path: PathBuf::from(format!("{root}\\")),
+            display_root: root.to_owned(),
+            label: "Windows".to_owned(),
+            usage: VolumeUsage {
+                total: 2_000,
+                free: 700,
+            },
+        }
+    }
+
+    #[test]
+    fn responsive_grid_keeps_cards_above_the_minimum_width() {
+        assert_eq!(volume_grid_columns(500.0), 1);
+        assert_eq!(volume_grid_columns(800.0), 2);
+        assert_eq!(volume_grid_columns(1_280.0), 4);
+    }
+
+    #[test]
+    fn long_labels_are_truncated_without_splitting_unicode() {
+        assert_eq!(truncate_volume_label("Windows", 12), "Windows");
+        assert_eq!(
+            truncate_volume_label("Рабочий накопитель", 10),
+            "Рабочий н…"
+        );
+    }
+
+    #[test]
+    fn transient_refresh_failure_keeps_the_previous_cache() {
+        let mut cache = vec![volume("C:")];
+        let mut error = None;
+        apply_volume_refresh(&mut cache, &mut error, Err("drive query timed out".into()));
+        assert_eq!(cache, vec![volume("C:")]);
+        assert_eq!(error.as_deref(), Some("drive query timed out"));
+
+        apply_volume_refresh(&mut cache, &mut error, Ok(vec![volume("D:")]));
+        assert_eq!(cache, vec![volume("D:")]);
+        assert_eq!(error, None);
     }
 }

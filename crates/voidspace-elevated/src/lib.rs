@@ -151,8 +151,41 @@ pub fn turbo_mode_for(root: &Path) -> TurboMode {
     }
 }
 
+fn quote_windows_argument(argument: &str) -> String {
+    let mut quoted = String::with_capacity(argument.len() + 2);
+    quoted.push('"');
+    let mut backslashes = 0_usize;
+
+    for character in argument.chars() {
+        if character == '\\' {
+            backslashes += 1;
+            continue;
+        }
+
+        if character == '"' {
+            quoted.extend(std::iter::repeat_n('\\', backslashes * 2 + 1));
+        } else {
+            quoted.extend(std::iter::repeat_n('\\', backslashes));
+        }
+        backslashes = 0;
+        quoted.push(character);
+    }
+
+    quoted.extend(std::iter::repeat_n('\\', backslashes * 2));
+    quoted.push('"');
+    quoted
+}
+
+pub fn windows_command_line(arguments: &[&str]) -> String {
+    arguments
+        .iter()
+        .map(|argument| quote_windows_argument(argument))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 #[cfg(windows)]
-pub fn launch_elevated(executable: &Path, arguments: &str) -> Result<(), std::io::Error> {
+pub fn launch_elevated(executable: &Path, arguments: &[&str]) -> Result<(), std::io::Error> {
     use std::os::windows::ffi::OsStrExt;
     use windows::{
         Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL},
@@ -167,7 +200,8 @@ pub fn launch_elevated(executable: &Path, arguments: &str) -> Result<(), std::io
     };
     let verb = wide(std::ffi::OsStr::new("runas"));
     let file = wide(executable.as_os_str());
-    let args = wide(std::ffi::OsStr::new(arguments));
+    let command_line = windows_command_line(arguments);
+    let args = wide(std::ffi::OsStr::new(&command_line));
     let result = unsafe {
         ShellExecuteW(
             None,
@@ -186,7 +220,7 @@ pub fn launch_elevated(executable: &Path, arguments: &str) -> Result<(), std::io
 }
 
 #[cfg(not(windows))]
-pub fn launch_elevated(_executable: &Path, _arguments: &str) -> Result<(), std::io::Error> {
+pub fn launch_elevated(_executable: &Path, _arguments: &[&str]) -> Result<(), std::io::Error> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         "UAC is Windows-only",
