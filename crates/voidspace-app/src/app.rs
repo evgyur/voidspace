@@ -86,6 +86,7 @@ struct FileOpDialog {
 }
 
 pub struct VoidspaceApp {
+    typography: theme::Typography,
     tabs: Vec<ScanTab>,
     active_tab: usize,
     next_scan_id: u64,
@@ -111,12 +112,14 @@ pub struct VoidspaceApp {
 
 impl VoidspaceApp {
     pub fn new(context: &eframe::CreationContext<'_>) -> Self {
-        theme::install(&context.egui_ctx);
+        let typography = theme::install(&context.egui_ctx);
+        tracing::info!(source = ?typography.source(), "typography installed");
         let settings = Settings::load();
         let default_scope = settings.last_scope.clone();
         let (fileop_tx, fileop_rx) = bounded(4);
         let (volume_refresh_tx, volume_refresh_rx) = bounded(1);
         let mut app = Self {
+            typography,
             tabs: Vec::new(),
             active_tab: 0,
             next_scan_id: 1,
@@ -391,9 +394,8 @@ impl VoidspaceApp {
                         [68.0, 36.0],
                         egui::Label::new(
                             egui::RichText::new("VOIDSPACE")
-                                .strong()
                                 .color(theme::ORANGE)
-                                .size(11.0),
+                                .font(self.typography.font(theme::TypographyToken::DisplayBrand)),
                         ),
                     );
                     let compact = ui.available_width() < 820.0;
@@ -410,6 +412,7 @@ impl VoidspaceApp {
                         [scope_width, 36.0],
                         egui::TextEdit::singleline(&mut self.scope_text)
                             .hint_text("C:\\ · press Enter to scan")
+                            .font(self.typography.font(theme::TypographyToken::DataNormal))
                             .margin(egui::Margin::symmetric(11, 8)),
                     );
                     if scope.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
@@ -419,6 +422,7 @@ impl VoidspaceApp {
                         [filter_width, 36.0],
                         egui::TextEdit::singleline(&mut self.filter_text)
                             .hint_text("size > 1GiB AND NOT attr:system")
+                            .font(self.typography.font(theme::TypographyToken::DataNormal))
                             .margin(egui::Margin::symmetric(11, 8)),
                     );
                     if filter_response.changed() {
@@ -435,15 +439,30 @@ impl VoidspaceApp {
                             }
                         }
                     }
+                    let mut turbo = egui::text::LayoutJob::default();
+                    turbo.append(
+                        "TURBO",
+                        0.0,
+                        egui::TextFormat {
+                            font_id: self.typography.font(theme::TypographyToken::DisplayAction),
+                            color: theme::BG,
+                            ..Default::default()
+                        },
+                    );
+                    turbo.append(
+                        " / F5",
+                        0.0,
+                        egui::TextFormat {
+                            font_id: self.typography.font(theme::TypographyToken::DataMicro),
+                            color: theme::BG,
+                            ..Default::default()
+                        },
+                    );
                     ui.add_sized(
                         [turbo_width, 36.0],
-                        egui::Button::new(
-                            egui::RichText::new(if compact { "TURBO ON" } else { "TURBO ACTIVE" })
-                                .strong()
-                                .color(theme::BG),
-                        )
-                        .fill(theme::ORANGE)
-                        .sense(egui::Sense::hover()),
+                        egui::Button::new(turbo)
+                            .fill(theme::ORANGE)
+                            .sense(egui::Sense::hover()),
                     )
                     .on_hover_text("Voidspace is already running with administrator privileges");
                 });
@@ -502,11 +521,11 @@ impl VoidspaceApp {
                         let width = (label.chars().count() as f32 * 7.4 + 30.0).clamp(92.0, 260.0);
                         let response = ui.add_sized(
                             [width, 31.0],
-                            egui::Button::new(egui::RichText::new(label).color(if active {
-                                theme::TEXT
-                            } else {
-                                theme::MUTED
-                            }))
+                            egui::Button::new(
+                                egui::RichText::new(label)
+                                    .font(self.typography.font(theme::TypographyToken::UiControl))
+                                    .color(if active { theme::TEXT } else { theme::MUTED }),
+                            )
                             .fill(if active {
                                 theme::RAISED
                             } else {
@@ -765,22 +784,28 @@ impl VoidspaceApp {
                                 ui.set_width(content_width);
                                 ui.label(
                                     egui::RichText::new("STORAGE / WINDOWS")
-                                        .monospace()
-                                        .size(10.0)
+                                        .font(
+                                            self.typography
+                                                .font(theme::TypographyToken::DataCompact),
+                                        )
                                         .color(theme::ORANGE),
                                 );
                                 ui.add_space(8.0);
                                 ui.label(
                                     egui::RichText::new("CHOOSE A VOLUME")
-                                        .size(30.0)
-                                        .strong()
+                                        .font(
+                                            self.typography
+                                                .font(theme::TypographyToken::DisplayView),
+                                        )
                                         .color(theme::TEXT),
                                 );
                                 ui.label(
                                     egui::RichText::new(
                                         "Select a disk to start scanning. Mounted volumes refresh automatically.",
                                     )
-                                    .size(14.0)
+                                    .font(
+                                        self.typography.font(theme::TypographyToken::UiBody),
+                                    )
                                     .color(theme::MUTED),
                                 );
                                 ui.add_space(26.0);
@@ -1315,6 +1340,13 @@ impl eframe::App for VoidspaceApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        if self
+            .typography
+            .update_pixels_per_point(ui.ctx().pixels_per_point())
+        {
+            let _new_typography_epoch = self.typography.epoch();
+            ui.ctx().request_repaint();
+        }
         self.top_bar(ui);
         self.tab_bar(ui);
         self.status_bar(ui);
