@@ -106,7 +106,6 @@ pub struct VoidspaceApp {
     volume_refresh_in_flight: bool,
     volume_discovery_complete: bool,
     volume_discovery_error: Option<String>,
-    turbo_session: bool,
     settings: Settings,
 }
 
@@ -138,7 +137,6 @@ impl VoidspaceApp {
             volume_refresh_in_flight: false,
             volume_discovery_complete: false,
             volume_discovery_error: None,
-            turbo_session: std::env::args().any(|argument| argument == "--turbo"),
             settings,
         };
         let arguments: Vec<String> = std::env::args().collect();
@@ -399,8 +397,8 @@ impl VoidspaceApp {
                         ),
                     );
                     let compact = ui.available_width() < 820.0;
-                    let privilege_width = if compact { 0.0 } else { 66.0 };
-                    let fixed = 112.0 + privilege_width + if compact { 20.0 } else { 30.0 };
+                    let turbo_width = if compact { 112.0 } else { 132.0 };
+                    let fixed = turbo_width + if compact { 20.0 } else { 30.0 };
                     let fields = (ui.available_width() - fixed).max(280.0);
                     let filter_width = if compact {
                         (fields * 0.42).clamp(150.0, 220.0)
@@ -437,26 +435,17 @@ impl VoidspaceApp {
                             }
                         }
                     }
-                    if ui
-                        .add_sized(
-                            [112.0, 36.0],
-                            egui::Button::new(
-                                egui::RichText::new("TURBO / F5").strong().color(theme::BG),
-                            )
-                            .fill(theme::ORANGE),
+                    ui.add_sized(
+                        [turbo_width, 36.0],
+                        egui::Button::new(
+                            egui::RichText::new(if compact { "TURBO ON" } else { "TURBO ACTIVE" })
+                                .strong()
+                                .color(theme::BG),
                         )
-                        .clicked()
-                    {
-                        self.launch_turbo();
-                    }
-                    if !compact {
-                        egui::Frame::new()
-                            .stroke(egui::Stroke::new(1.0, theme::ORANGE))
-                            .inner_margin(egui::Margin::symmetric(9, 7))
-                            .show(ui, |ui| {
-                                ui.monospace(if self.turbo_session { "ADMIN" } else { "USER" });
-                            });
-                    }
+                        .fill(theme::ORANGE)
+                        .sense(egui::Sense::hover()),
+                    )
+                    .on_hover_text("Voidspace is already running with administrator privileges");
                 });
             });
         if normal_scan {
@@ -1068,21 +1057,6 @@ impl VoidspaceApp {
         }
     }
 
-    fn launch_turbo(&mut self) {
-        match std::env::current_exe() {
-            Ok(executable) => {
-                let arguments = ["--turbo", "--scan", self.scope_text.trim()];
-                match voidspace_elevated::launch_elevated(&executable, &arguments) {
-                    Ok(()) => {
-                        self.toast = Some("Launching privileged Turbo traversal through UAC".into())
-                    }
-                    Err(error) => self.toast = Some(format!("Turbo launch failed: {error}")),
-                }
-            }
-            Err(error) => self.toast = Some(format!("Cannot locate Voidspace: {error}")),
-        }
-    }
-
     fn status_bar(&mut self, root_ui: &mut egui::Ui) {
         egui::Panel::bottom("status")
             .exact_size(30.0)
@@ -1141,14 +1115,12 @@ impl VoidspaceApp {
                         ui.separator();
                         ui.label(egui::RichText::new("FILE OPERATION").color(theme::MAGENTA));
                     }
-                    if self.turbo_session {
-                        ui.separator();
-                        ui.label(
-                            egui::RichText::new("TURBO FALLBACK")
-                                .strong()
-                                .color(theme::LIME),
-                        );
-                    }
+                    ui.separator();
+                    ui.label(
+                        egui::RichText::new("TURBO ACTIVE")
+                            .strong()
+                            .color(theme::LIME),
+                    );
                     if let Some(toast) = &self.toast {
                         ui.separator();
                         ui.label(egui::RichText::new(toast).color(theme::ORANGE));
@@ -1338,9 +1310,6 @@ fn scan_batch_exhausted(processed: usize, elapsed: Duration) -> bool {
 
 impl eframe::App for VoidspaceApp {
     fn logic(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
-        if context.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::F5)) {
-            self.launch_turbo();
-        }
         self.update_workers(context);
     }
 
