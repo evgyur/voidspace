@@ -5,6 +5,47 @@ function Get-Sha256([string]$Path) {
     return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant()
 }
 
+if (-not ('Voidspace.NativeFile' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+namespace Voidspace {
+    public static class NativeFile {
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool MoveFileEx(
+            string existingFileName,
+            string newFileName,
+            uint flags
+        );
+    }
+}
+'@
+}
+
+function Remove-Or-DeferFile([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return }
+    try {
+        Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
+        return
+    }
+    catch {
+        # A running Windows executable may remain locked after File.Replace moved
+        # it to the rollback path. Ask Windows to delete only that exact file at
+        # reboot; if the non-elevated installer cannot register the request, keep
+        # the harmless rollback file for the next installer pass.
+        $moveFileDelayUntilReboot = 0x4
+        if ([Voidspace.NativeFile]::MoveFileEx($Path, $null, $moveFileDelayUntilReboot)) {
+            Write-Output "VOIDSPACE_CLEANUP_DEFERRED $Path"
+        }
+        else {
+            $nativeError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+            Write-Warning "Rollback file remains until the running old build exits: $Path (Win32 $nativeError)"
+        }
+    }
+}
+
 $source = (Resolve-Path -LiteralPath $SourceDir).Path
 if (-not (Test-Path -LiteralPath $source -PathType Container)) {
     throw "Package source is not a directory: $source"
@@ -60,13 +101,18 @@ $running | ForEach-Object {
 }
 
 New-Item -ItemType Directory -Force -Path $installDir | Out-Null
+foreach ($staleRollback in @(
+    "$installExe.old",
+    "$(Join-Path $installDir 'voidspace-elevated.exe').old"
+)) {
+    Remove-Or-DeferFile $staleRollback
+}
 foreach ($name in $rootFiles) {
     $from = Join-Path $source $name
     $to = Join-Path $installDir $name
     $next = "$to.new"
-    $old = "$to.old"
+    $old = "$to.rollback-$([Guid]::NewGuid().ToString('N'))"
     if (Test-Path -LiteralPath $next) { Remove-Item -LiteralPath $next -Force }
-    if (Test-Path -LiteralPath $old) { Remove-Item -LiteralPath $old -Force }
     Copy-Item -LiteralPath $from -Destination $next -Force
     if ((Get-Sha256 $from) -ne (Get-Sha256 $next)) {
         throw "Staged install copy mismatch: $name"
@@ -76,7 +122,7 @@ foreach ($name in $rootFiles) {
         if ((Get-Sha256 $from) -ne (Get-Sha256 $to)) {
             throw "Installed root file mismatch: $name"
         }
-        Remove-Item -LiteralPath $old -Force
+        Remove-Or-DeferFile $old
     }
     else {
         Move-Item -LiteralPath $next -Destination $to
