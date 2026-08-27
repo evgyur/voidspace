@@ -52,6 +52,7 @@ try {
     New-Item -ItemType Directory -Force $stage | Out-Null
     Copy-Item -LiteralPath (Join-Path $repo 'target\release\voidspace.exe') -Destination $stage
     Copy-Item -LiteralPath (Join-Path $repo 'target\release\voidspace-elevated.exe') -Destination $stage
+    Copy-Item -LiteralPath (Join-Path $repo 'crates\voidspace-app\assets\voidspace.ico') -Destination $stage
     Copy-Item -LiteralPath (Join-Path $repo 'README.md') -Destination $stage
     Copy-Item -LiteralPath (Join-Path $repo 'LICENSE') -Destination $stage
 

@@ -7,9 +7,12 @@ fn main() -> eframe::Result<()> {
         .with_target(false)
         .compact()
         .init();
+    let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/voidspace.png"))
+        .expect("embedded Voidspace window icon must be valid PNG");
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Voidspace")
+            .with_icon(icon)
             .with_inner_size([1440.0, 900.0])
             .with_min_inner_size([800.0, 600.0]),
         ..Default::default()

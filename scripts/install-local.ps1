@@ -19,6 +19,14 @@ namespace Voidspace {
             string newFileName,
             uint flags
         );
+
+        [DllImport("shell32.dll")]
+        public static extern void SHChangeNotify(
+            uint eventId,
+            uint flags,
+            IntPtr item1,
+            IntPtr item2
+        );
     }
 }
 '@
@@ -52,6 +60,7 @@ if (-not (Test-Path -LiteralPath $source -PathType Container)) {
 }
 $installDir = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Voidspace'
 $installExe = Join-Path $installDir 'voidspace.exe'
+$installIcon = Join-Path $installDir 'voidspace.ico'
 $installedExecutables = @(
     $installExe,
     (Join-Path $installDir 'voidspace-elevated.exe'),
@@ -64,6 +73,7 @@ $shortcutPath = Join-Path $desktop 'Voidspace.lnk'
 $rootFiles = @(
     'voidspace.exe',
     'voidspace-elevated.exe',
+    'voidspace.ico',
     'README.md',
     'LICENSE',
     'SHA256SUMS.txt',
@@ -166,8 +176,11 @@ $shell = New-Object -ComObject WScript.Shell
 $shortcut = $shell.CreateShortcut($shortcutPath)
 $shortcut.TargetPath = $installExe
 $shortcut.WorkingDirectory = $installDir
-$shortcut.IconLocation = "$installExe,0"
+$shortcut.IconLocation = "$installIcon,0"
 $shortcut.Save()
+
+# Force Explorer to invalidate the stale generic executable icon immediately.
+[Voidspace.NativeFile]::SHChangeNotify(0x08000000, 0x0000, [IntPtr]::Zero, [IntPtr]::Zero)
 
 $readBack = $shell.CreateShortcut($shortcutPath)
 if ([IO.Path]::GetFullPath($readBack.TargetPath) -ne [IO.Path]::GetFullPath($installExe)) {
@@ -175,6 +188,9 @@ if ([IO.Path]::GetFullPath($readBack.TargetPath) -ne [IO.Path]::GetFullPath($ins
 }
 if ([IO.Path]::GetFullPath($readBack.WorkingDirectory) -ne [IO.Path]::GetFullPath($installDir)) {
     throw 'Desktop shortcut working directory mismatch'
+}
+if ([IO.Path]::GetFullPath(($readBack.IconLocation -split ',')[0]) -ne [IO.Path]::GetFullPath($installIcon)) {
+    throw 'Desktop shortcut icon mismatch'
 }
 $packageHash = Get-Sha256 (Join-Path $source 'voidspace.exe')
 $installedHash = Get-Sha256 $installExe
