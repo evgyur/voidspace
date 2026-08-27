@@ -3,7 +3,7 @@ use std::{
     sync::Arc,
 };
 
-use egui::{Align2, Color32, FontId, Galley, Pos2, Rect, Sense, Stroke, StrokeKind, Ui};
+use egui::{Align2, Color32, FontId, Galley, Pos2, Rect, Sense, Stroke, Ui};
 use voidspace_filter::{Expr, FilterContext, matches};
 use voidspace_index::IndexSnapshot;
 use voidspace_layout::{
@@ -12,7 +12,7 @@ use voidspace_layout::{
 use voidspace_model::{DirtySet, NodeId};
 
 use crate::{
-    theme,
+    hud, theme,
     treemap_state::{AggregateSelection, TreemapAction},
 };
 
@@ -476,16 +476,8 @@ impl PreviewState {
 
 pub struct TreemapResponse {
     pub action: Option<TreemapAction>,
-    pub context_target: Option<NodeId>,
-    pub context_action: Option<TreemapContextAction>,
+    pub context_target: Option<(NodeId, egui::Id)>,
     pub aggregate_still_valid: bool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TreemapContextAction {
-    Reveal(NodeId),
-    Recycle(NodeId),
-    Permanent(NodeId),
 }
 
 #[derive(Clone, Debug)]
@@ -569,6 +561,7 @@ pub(crate) struct ShowRequest<'a> {
     pub typography: &'a theme::Typography,
     pub base_metrics: &'a CandidateMetrics,
     pub open_aggregate: Option<&'a AggregateSelection>,
+    pub interactive: bool,
 }
 
 pub fn show(ui: &mut Ui, request: ShowRequest<'_>) -> TreemapResponse {
@@ -581,11 +574,29 @@ pub fn show(ui: &mut Ui, request: ShowRequest<'_>) -> TreemapResponse {
         typography,
         base_metrics,
         open_aggregate,
+        interactive,
     } = request;
     let desired = ui.available_size();
     let (response, painter) = ui.allocate_painter(desired, Sense::click());
     let bounds = response.rect;
     painter.rect_filled(bounds, 0.0, theme::MAP_BG);
+    let grid_step = 32.0;
+    let mut x = bounds.left();
+    while x <= bounds.right() {
+        painter.line_segment(
+            [Pos2::new(x, bounds.top()), Pos2::new(x, bounds.bottom())],
+            Stroke::new(0.5, hud::GRID),
+        );
+        x += grid_step;
+    }
+    let mut y = bounds.top();
+    while y <= bounds.bottom() {
+        painter.line_segment(
+            [Pos2::new(bounds.left(), y), Pos2::new(bounds.right(), y)],
+            Stroke::new(0.5, hud::GRID),
+        );
+        y += grid_step;
+    }
 
     let pointer = ui
         .ctx()
@@ -888,52 +899,28 @@ pub fn show(ui: &mut Ui, request: ShowRequest<'_>) -> TreemapResponse {
         }
     }
 
+    if !interactive {
+        return TreemapResponse {
+            action: None,
+            context_target: None,
+            aggregate_still_valid: aggregate_is_still_valid(open_aggregate, &rendered_aggregates),
+        };
+    }
     let base_responses = hit_responses(ui, base_layout.root, base_hits);
     let nested_responses = hit_responses(ui, base_layout.root, nested_hits);
     let mut action = None;
     let mut context_target = None;
-    let mut context_action = None;
     for (hit, tile_response) in nested_responses
         .iter()
         .rev()
         .chain(base_responses.iter().rev())
     {
         if let Some(node_id) = file_action_target(hit) {
-            if tile_response.secondary_clicked() {
-                context_target = Some(node_id);
+            let keyboard_context = tile_response.has_focus()
+                && ui.input(|input| input.modifiers.shift && input.key_pressed(egui::Key::F10));
+            if tile_response.secondary_clicked() || keyboard_context {
+                context_target = Some((node_id, tile_response.id));
             }
-            tile_response.context_menu(|ui| {
-                ui.set_min_width(250.0);
-                ui.label(egui::RichText::new(&hit.name).strong().color(theme::TEXT));
-                ui.label(
-                    egui::RichText::new(&hit.formatted_size)
-                        .monospace()
-                        .small()
-                        .color(theme::MUTED),
-                );
-                ui.separator();
-                if ui.button("OPEN IN EXPLORER").clicked() {
-                    context_action = Some(TreemapContextAction::Reveal(node_id));
-                    ui.close();
-                }
-                if ui.button("MOVE TO RECYCLE BIN").clicked() {
-                    context_action = Some(TreemapContextAction::Recycle(node_id));
-                    ui.close();
-                }
-                ui.separator();
-                if ui
-                    .add(
-                        egui::Button::new(
-                            egui::RichText::new("DELETE WITHOUT RECOVERY").color(theme::ORANGE),
-                        )
-                        .stroke(egui::Stroke::new(1.0, theme::ORANGE)),
-                    )
-                    .clicked()
-                {
-                    context_action = Some(TreemapContextAction::Permanent(node_id));
-                    ui.close();
-                }
-            });
         }
         let keyboard_zoom = tile_response.has_focus()
             && ui.input(|input| input.modifiers.ctrl && input.key_pressed(egui::Key::Enter));
@@ -964,7 +951,6 @@ pub fn show(ui: &mut Ui, request: ShowRequest<'_>) -> TreemapResponse {
     TreemapResponse {
         action,
         context_target,
-        context_action,
         aggregate_still_valid: aggregate_is_still_valid(open_aggregate, &rendered_aggregates),
     }
 }
@@ -1090,10 +1076,10 @@ fn paint_tile(
     } else {
         blend(accent, theme::LINE, 0.58)
     };
-    painter.rect_filled(rect, 0.0, fill);
-    painter.rect_stroke(
+    hud::paint_cut_frame(
+        painter,
         rect,
-        0.0,
+        fill,
         Stroke::new(
             if selected == Some(node.node_id) || preview_active {
                 2.0
@@ -1102,8 +1088,14 @@ fn paint_tile(
             },
             border,
         ),
-        StrokeKind::Inside,
+        6.0,
     );
+    if selected == Some(node.node_id) {
+        hud::paint_corner_brackets(painter, rect.shrink(3.0), theme::ORANGE);
+        if rect.width() >= 64.0 && rect.height() >= 64.0 {
+            hud::paint_reticle(painter, rect.center(), theme::ORANGE);
+        }
+    }
 
     debug_assert_eq!(label.identity.node_id, node.node_id);
     debug_assert!(!label.formatted_size.is_empty());

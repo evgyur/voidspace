@@ -2,11 +2,17 @@
 
 mod app;
 pub mod diagnostics;
+mod hud;
+mod overlay_coordinator;
 pub mod settings;
+mod shell;
+mod status_bar;
+mod tactical_arc;
 mod theme;
 mod treemap;
 mod treemap_state;
 mod volume;
+mod volume_display_registry;
 mod volume_switcher;
 
 pub use app::{VoidspaceApp, WorkspaceMode, workspace_mode};

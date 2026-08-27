@@ -1,6 +1,7 @@
 $ErrorActionPreference = 'Stop'
 
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$packageTarget = Join-Path $repo 'target\package-build'
 $dist = Join-Path $repo 'dist'
 $stage = Join-Path $dist 'Voidspace-0.1.0-windows-x64'
 $archive = Join-Path $dist 'Voidspace-0.1.0-windows-x64.zip'
@@ -33,6 +34,7 @@ function Get-Sha256([string]$Path) {
 
 Push-Location $repo
 try {
+    $env:CARGO_TARGET_DIR = $packageTarget
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'sync-font-assets.ps1') -Check
     if ($LASTEXITCODE -ne 0) { throw 'font asset verification failed' }
     & cargo fmt --all -- --check
@@ -50,8 +52,8 @@ try {
     Remove-WithRetry -Path $stage -Recurse
     Remove-WithRetry -Path $archive
     New-Item -ItemType Directory -Force $stage | Out-Null
-    Copy-Item -LiteralPath (Join-Path $repo 'target\release\voidspace.exe') -Destination $stage
-    Copy-Item -LiteralPath (Join-Path $repo 'target\release\voidspace-elevated.exe') -Destination $stage
+    Copy-Item -LiteralPath (Join-Path $packageTarget 'release\voidspace.exe') -Destination $stage
+    Copy-Item -LiteralPath (Join-Path $packageTarget 'release\voidspace-elevated.exe') -Destination $stage
     Copy-Item -LiteralPath (Join-Path $repo 'crates\voidspace-app\assets\voidspace.ico') -Destination $stage
     Copy-Item -LiteralPath (Join-Path $repo 'README.md') -Destination $stage
     Copy-Item -LiteralPath (Join-Path $repo 'LICENSE') -Destination $stage

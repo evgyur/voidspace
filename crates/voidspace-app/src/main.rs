@@ -15,6 +15,8 @@ fn main() -> eframe::Result<()> {
             .with_icon(icon)
             .with_inner_size([1440.0, 900.0])
             .with_min_inner_size([800.0, 600.0]),
+        centered: true,
+        persist_window: false,
         ..Default::default()
     };
     eframe::run_native(
