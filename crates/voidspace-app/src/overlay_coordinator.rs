@@ -18,6 +18,7 @@ pub struct OverlayCoordinator {
     transient: Option<TransientOverlay>,
     modal: Option<ModalOverlay>,
     restore_focus: Option<egui::Id>,
+    transient_just_opened: bool,
 }
 
 impl OverlayCoordinator {
@@ -33,17 +34,20 @@ impl OverlayCoordinator {
         if self.modal.is_none() {
             self.transient = Some(overlay);
             self.restore_focus = restore_focus;
+            self.transient_just_opened = true;
         }
     }
 
     pub fn open_modal(&mut self, overlay: ModalOverlay) {
         self.transient = None;
         self.restore_focus = None;
+        self.transient_just_opened = false;
         self.modal = Some(overlay);
     }
 
     pub fn close_transient(&mut self, context: &egui::Context) {
         self.transient = None;
+        self.transient_just_opened = false;
         if let Some(id) = self.restore_focus.take() {
             context.memory_mut(|memory| memory.request_focus(id));
         }
@@ -52,6 +56,11 @@ impl OverlayCoordinator {
     pub fn dismiss_transient(&mut self) {
         self.transient = None;
         self.restore_focus = None;
+        self.transient_just_opened = false;
+    }
+
+    pub fn take_transient_just_opened(&mut self) -> bool {
+        std::mem::take(&mut self.transient_just_opened)
     }
 
     pub fn close_modal(&mut self) {
@@ -90,5 +99,13 @@ mod tests {
         overlays.open_modal(ModalOverlay::PermanentDelete);
         assert_eq!(overlays.modal(), Some(ModalOverlay::PermanentDelete));
         assert_eq!(overlays.transient(), None);
+    }
+
+    #[test]
+    fn just_opened_flag_is_consumed_once() {
+        let mut overlays = OverlayCoordinator::default();
+        overlays.open_transient(TransientOverlay::About, None);
+        assert!(overlays.take_transient_just_opened());
+        assert!(!overlays.take_transient_just_opened());
     }
 }

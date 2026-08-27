@@ -20,6 +20,17 @@ pub enum HudState {
     Danger,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HudMotionState {
+    Idle,
+    InputDriven,
+    Scanning,
+}
+
+pub const fn hud_requires_autonomous_repaint(state: HudMotionState) -> bool {
+    matches!(state, HudMotionState::Scanning)
+}
+
 impl HudState {
     pub const fn label(self) -> &'static str {
         match self {
@@ -165,5 +176,14 @@ mod tests {
         assert_eq!(HudState::Active.label(), "ACTIVE");
         assert_eq!(HudState::Warning.label(), "WARNING");
         assert_eq!(HudState::Danger.label(), "DANGER");
+    }
+
+    #[test]
+    fn static_hud_components_do_not_request_autonomous_repaint() {
+        assert!(!hud_requires_autonomous_repaint(HudMotionState::Idle));
+        assert!(!hud_requires_autonomous_repaint(
+            HudMotionState::InputDriven
+        ));
+        assert!(hud_requires_autonomous_repaint(HudMotionState::Scanning));
     }
 }

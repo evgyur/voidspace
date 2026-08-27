@@ -13,6 +13,14 @@ try {
     if ($typography -notmatch '^typography_source=embedded-selected ') { throw 'selected typography was not active' }
     Write-Output $typography
 
+    $hudJson = & cargo run --quiet -p voidspace-app --bin voidspace-smoke --release -- --hud-benchmark
+    if ($LASTEXITCODE -ne 0) { throw 'HUD render benchmark failed' }
+    $hud = $hudJson | ConvertFrom-Json
+    if ($hud.fixture_tiles -ne 1024 -or $hud.measured_frames -ne 600) { throw 'HUD benchmark fixture contract changed' }
+    if ($hud.idle_autonomous_repaint) { throw 'static HUD requested autonomous idle repaint' }
+    if ($hud.p95_ms -ge 16.7) { throw "HUD p95 exceeded frame budget: $($hud.p95_ms) ms" }
+    Write-Output $hudJson
+
     New-Item -ItemType Directory -Force $root, $out1, $out2, $deleteTarget | Out-Null
     [System.IO.File]::WriteAllBytes((Join-Path $root 'alpha.bin'), [byte[]]::new(8192))
     [System.IO.File]::WriteAllText((Join-Path $deleteTarget 'gone.txt'), 'temporary')

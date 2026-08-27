@@ -2,7 +2,7 @@
 
 mod app;
 pub mod diagnostics;
-mod hud;
+pub mod hud;
 mod overlay_coordinator;
 pub mod settings;
 mod shell;

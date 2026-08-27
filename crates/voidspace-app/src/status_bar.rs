@@ -68,33 +68,34 @@ fn estimated_width(module: &StatusModule) -> f32 {
 pub fn layout_modules(width: f32, modules: &[StatusModule]) -> StatusLayout<'_> {
     let mut ordered: Vec<_> = modules.iter().collect();
     ordered.sort_by_key(|module| std::cmp::Reverse(module.kind.priority()));
-    let mut visible = Vec::new();
-    let mut hidden = Vec::new();
-    let mut used = 0.0;
-    for module in ordered {
-        let reserve_more = if visible.len() + hidden.len() + 1 < modules.len() {
+    let minimum_visible = ordered.len().min(2);
+    let mut visible_count = ordered.len();
+    while visible_count > minimum_visible {
+        let module_width: f32 = ordered[..visible_count]
+            .iter()
+            .map(|module| estimated_width(module))
+            .sum();
+        let more_width = if visible_count < ordered.len() {
             100.0
         } else {
             0.0
         };
-        let module_width = estimated_width(module);
-        if used + module_width + reserve_more <= width
-            || matches!(module.kind, StatusKind::Scan | StatusKind::Engine)
-        {
-            used += module_width;
-            visible.push(module);
-        } else {
-            hidden.push(module);
+        if module_width + more_width <= width {
+            break;
         }
+        visible_count -= 1;
     }
-    StatusLayout { visible, hidden }
+    StatusLayout {
+        visible: ordered[..visible_count].to_vec(),
+        hidden: ordered[visible_count..].to_vec(),
+    }
 }
 
 pub fn show(
     ui: &mut egui::Ui,
     typography: &theme::Typography,
     modules: &[StatusModule],
-) -> Option<egui::Id> {
+) -> Option<(egui::Id, Vec<StatusModule>)> {
     let layout = layout_modules(ui.available_width(), modules);
     let mut more_focus = None;
     ui.horizontal_centered(|ui| {
@@ -135,7 +136,14 @@ pub fn show(
             if response.clicked()
                 || (response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)))
             {
-                more_focus = Some(id);
+                more_focus = Some((
+                    id,
+                    layout
+                        .hidden
+                        .iter()
+                        .map(|module| (*module).clone())
+                        .collect(),
+                ));
             }
         }
     });
@@ -146,9 +154,9 @@ pub fn show_details(
     context: &egui::Context,
     typography: &theme::Typography,
     modules: &[StatusModule],
-) -> bool {
+) -> (bool, Option<egui::Rect>) {
     let mut open = true;
-    egui::Window::new("STATUS DETAILS")
+    let shown = egui::Window::new("STATUS DETAILS")
         .id(egui::Id::new("status-details"))
         .open(&mut open)
         .collapsible(false)
@@ -177,7 +185,7 @@ pub fn show_details(
                 }
             });
         });
-    open
+    (open, shown.map(|response| response.response.rect))
 }
 
 #[cfg(test)]
@@ -219,5 +227,12 @@ mod tests {
                 .any(|module| module.kind == StatusKind::Engine)
         );
         assert!(!layout.hidden.is_empty());
+        let priorities = layout
+            .visible
+            .iter()
+            .chain(&layout.hidden)
+            .map(|module| module.kind.priority())
+            .collect::<Vec<_>>();
+        assert!(priorities.windows(2).all(|pair| pair[0] >= pair[1]));
     }
 }

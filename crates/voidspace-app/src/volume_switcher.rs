@@ -93,7 +93,9 @@ pub(crate) fn show(
     scope_text: &mut String,
     state: &mut VolumeSwitcherState,
     volumes: &[volume::VolumeInfo],
+    volume_ids: &[String],
     active: Option<VolumeRootKey>,
+    active_volume_id: Option<&str>,
     refresh_in_flight: bool,
     refresh_error: Option<&str>,
     typography: &theme::Typography,
@@ -106,7 +108,13 @@ pub(crate) fn show(
     let mut anchor = egui::Rect::NOTHING;
     let arrow = if state.open { '▴' } else { '▾' };
     let drive_label = active
-        .map(|root| format!("{} {arrow}", root.display()))
+        .map(|root| {
+            format!(
+                "{} · {} {arrow}",
+                active_volume_id.unwrap_or("VOL:--"),
+                root.display()
+            )
+        })
         .unwrap_or_else(|| format!("DISKS {arrow}"));
 
     ui.horizontal(|ui| {
@@ -260,11 +268,13 @@ pub(crate) fn show(
                                         .color(theme::MUTED),
                                 );
                             }
-                            for volume in volumes {
+                            for (volume, volume_id) in volumes.iter().zip(volume_ids) {
                                 let root = VolumeRootKey::from_scan_root(&volume.root_path);
                                 let is_current = root == active;
                                 let focused = root == state.focused;
-                                if volume_row(ui, volume, is_current, focused, typography) {
+                                if volume_row(
+                                    ui, volume, volume_id, is_current, focused, typography,
+                                ) {
                                     action = VolumeSwitcherAction::OpenOrActivate(
                                         volume.root_path.clone(),
                                     );
@@ -297,6 +307,7 @@ pub(crate) fn show(
 fn volume_row(
     ui: &mut egui::Ui,
     volume: &volume::VolumeInfo,
+    volume_id: &str,
     current: bool,
     focused: bool,
     typography: &theme::Typography,
@@ -328,7 +339,7 @@ fn volume_row(
     painter.text(
         egui::pos2(rect.left() + 12.0, rect.top() + 10.0),
         Align2::LEFT_TOP,
-        format!("{}  {}", volume.display_root, volume.label),
+        format!("{volume_id} · {}  {}", volume.display_root, volume.label),
         typography.font(theme::TypographyToken::UiControl),
         theme::TEXT,
     );
@@ -363,7 +374,7 @@ fn volume_row(
             WidgetType::Button,
             true,
             format!(
-                "{} {}, total {}, free {}, {verb}",
+                "{volume_id}, {} {}, total {}, free {}, {verb}",
                 volume.display_root,
                 volume.label,
                 volume::format_decimal_bytes(volume.usage.total),

@@ -476,7 +476,7 @@ impl PreviewState {
 
 pub struct TreemapResponse {
     pub action: Option<TreemapAction>,
-    pub context_target: Option<(NodeId, egui::Id)>,
+    pub context_target: Option<(NodeId, egui::Id, bool)>,
     pub aggregate_still_valid: bool,
 }
 
@@ -580,22 +580,24 @@ pub fn show(ui: &mut Ui, request: ShowRequest<'_>) -> TreemapResponse {
     let (response, painter) = ui.allocate_painter(desired, Sense::click());
     let bounds = response.rect;
     painter.rect_filled(bounds, 0.0, theme::MAP_BG);
-    let grid_step = 32.0;
-    let mut x = bounds.left();
-    while x <= bounds.right() {
-        painter.line_segment(
-            [Pos2::new(x, bounds.top()), Pos2::new(x, bounds.bottom())],
-            Stroke::new(0.5, hud::GRID),
-        );
-        x += grid_step;
-    }
-    let mut y = bounds.top();
-    while y <= bounds.bottom() {
-        painter.line_segment(
-            [Pos2::new(bounds.left(), y), Pos2::new(bounds.right(), y)],
-            Stroke::new(0.5, hud::GRID),
-        );
-        y += grid_step;
+    let grid_step = 26.0;
+    if grid_step * ui.ctx().pixels_per_point() >= 12.0 {
+        let mut x = bounds.left();
+        while x <= bounds.right() {
+            painter.line_segment(
+                [Pos2::new(x, bounds.top()), Pos2::new(x, bounds.bottom())],
+                Stroke::new(0.5, hud::GRID),
+            );
+            x += grid_step;
+        }
+        let mut y = bounds.top();
+        while y <= bounds.bottom() {
+            painter.line_segment(
+                [Pos2::new(bounds.left(), y), Pos2::new(bounds.right(), y)],
+                Stroke::new(0.5, hud::GRID),
+            );
+            y += grid_step;
+        }
     }
 
     let pointer = ui
@@ -681,6 +683,7 @@ pub fn show(ui: &mut Ui, request: ShowRequest<'_>) -> TreemapResponse {
             filter,
             active_base == Some(node.node_id),
             preview.pinned == Some(node.node_id),
+            hovered_base == Some(node.node_id),
             base_plan
                 .tiles
                 .get(&TileIdentity {
@@ -869,6 +872,7 @@ pub fn show(ui: &mut Ui, request: ShowRequest<'_>) -> TreemapResponse {
                     filter,
                     next_active == Some(node.node_id),
                     preview.pinned == Some(node.node_id),
+                    hovered_child == Some(node.node_id),
                     nested_plan
                         .tiles
                         .get(&TileIdentity {
@@ -919,7 +923,7 @@ pub fn show(ui: &mut Ui, request: ShowRequest<'_>) -> TreemapResponse {
             let keyboard_context = tile_response.has_focus()
                 && ui.input(|input| input.modifiers.shift && input.key_pressed(egui::Key::F10));
             if tile_response.secondary_clicked() || keyboard_context {
-                context_target = Some((node_id, tile_response.id));
+                context_target = Some((node_id, tile_response.id, keyboard_context));
             }
         }
         let keyboard_zoom = tile_response.has_focus()
@@ -1044,6 +1048,7 @@ fn paint_tile(
     filter: Option<&Expr>,
     preview_active: bool,
     preview_pinned: bool,
+    hovered: bool,
     label: &TileLabelPlan,
 ) {
     let index_node = snapshot.node(node.node_id);
@@ -1076,25 +1081,25 @@ fn paint_tile(
     } else {
         blend(accent, theme::LINE, 0.58)
     };
-    hud::paint_cut_frame(
-        painter,
-        rect,
-        fill,
-        Stroke::new(
-            if selected == Some(node.node_id) || preview_active {
-                2.0
-            } else {
-                1.0
-            },
-            border,
-        ),
-        6.0,
+    let stroke = Stroke::new(
+        if selected == Some(node.node_id) || preview_active {
+            2.0
+        } else {
+            1.0
+        },
+        border,
     );
+    if !node.aggregated && rect.width() >= 48.0 && rect.height() >= 34.0 {
+        hud::paint_cut_frame(painter, rect, fill, stroke, 6.0);
+    } else {
+        painter.rect_filled(rect, 0.0, fill);
+        painter.rect_stroke(rect, 0.0, stroke, egui::StrokeKind::Inside);
+    }
     if selected == Some(node.node_id) {
         hud::paint_corner_brackets(painter, rect.shrink(3.0), theme::ORANGE);
-        if rect.width() >= 64.0 && rect.height() >= 64.0 {
-            hud::paint_reticle(painter, rect.center(), theme::ORANGE);
-        }
+    }
+    if hovered && rect.width() >= 64.0 && rect.height() >= 64.0 {
+        hud::paint_reticle(painter, rect.center(), hud::CYAN);
     }
 
     debug_assert_eq!(label.identity.node_id, node.node_id);

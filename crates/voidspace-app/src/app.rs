@@ -15,7 +15,7 @@ use voidspace_index::{Index, IndexSnapshot};
 use voidspace_layout::{
     LayoutSnapshot, Rect as LayoutRect, SizeMode, ViewState, layout, layout_subset,
 };
-use voidspace_model::{DirtySet, EventEnvelope, EventPayload, NodeId, NodeKind, WinName};
+use voidspace_model::{DirtySet, EventEnvelope, EventPayload, NodeId, WinName};
 use voidspace_scan::{ScanHandle, ScanRequest, describe_root, start};
 use voidspace_watch::{WatchHandle, WatchRequest, WatchSignal, watch};
 
@@ -305,6 +305,8 @@ pub struct VoidspaceApp {
     filter_text: String,
     filter: Option<Expr>,
     filter_error: Option<String>,
+    compact_filter_draft: String,
+    compact_filter_prior: String,
     details_drawer: bool,
     toast: Option<String>,
     fileop_dialog: Option<FileOpDialog>,
@@ -322,6 +324,7 @@ pub struct VoidspaceApp {
     overlays: OverlayCoordinator,
     tactical_arc: Option<TacticalArcState>,
     volume_labels: VolumeDisplayRegistry,
+    status_detail_modules: Vec<StatusModule>,
     settings: Settings,
 }
 
@@ -343,6 +346,8 @@ impl VoidspaceApp {
             filter_text: String::new(),
             filter: None,
             filter_error: None,
+            compact_filter_draft: String::new(),
+            compact_filter_prior: String::new(),
             details_drawer: false,
             toast: None,
             fileop_dialog: None,
@@ -360,6 +365,7 @@ impl VoidspaceApp {
             overlays: OverlayCoordinator::default(),
             tactical_arc: None,
             volume_labels: VolumeDisplayRegistry::default(),
+            status_detail_modules: Vec::new(),
             settings,
         };
         let arguments: Vec<String> = std::env::args().collect();
@@ -645,14 +651,37 @@ impl VoidspaceApp {
     }
 
     fn top_bar(&mut self, root_ui: &mut egui::Ui) {
+        let top_interactive = self.overlays.modal().is_none()
+            && !matches!(
+                self.overlays.transient(),
+                Some(
+                    TransientOverlay::TacticalArc
+                        | TransientOverlay::InspectorDrawer
+                        | TransientOverlay::StatusDetails
+                )
+            );
         let active_root = self
             .tabs
             .get(self.active_tab)
             .and_then(|tab| VolumeRootKey::from_scan_root(&tab.root_path));
+        let active_volume_id = self
+            .tabs
+            .get(self.active_tab)
+            .map(|tab| self.volume_labels.label_for(&tab.root_path));
+        let volume_ids = self
+            .available_volumes
+            .iter()
+            .map(|volume| self.volume_labels.label_for(&volume.root_path))
+            .collect::<Vec<_>>();
         let was_switcher_open = self.volume_switcher.open;
         let mut switcher_action = VolumeSwitcherAction::None;
         let shell_layout = ShellLayout::for_width(root_ui.max_rect().width());
         let compact = shell_layout.filter == FilterPlacement::OverlayTrigger;
+        let compact_filter_width = if self.filter_error.is_some() || self.filter.is_some() {
+            74.0
+        } else {
+            42.0
+        };
         let mut open_about = false;
         let mut open_filter = false;
         egui::Panel::top("topbar")
@@ -664,16 +693,19 @@ impl VoidspaceApp {
                     .stroke(egui::Stroke::new(1.0, hud::HAIRLINE)),
             )
             .show(root_ui, |ui| {
+                if !top_interactive {
+                    ui.disable();
+                }
                 ui.horizontal(|ui| {
                     ui.add_sized(
                         [if compact { 96.0 } else { 122.0 }, 38.0],
                         egui::Label::new(theme::brand_wordmark(&self.typography)),
                     );
                     let utility_width = if compact {
-                        42.0 + 96.0 + 30.0
+                        compact_filter_width + 96.0 + 30.0
                     } else {
                         260.0 + 116.0 + 64.0
-                    };
+                    } + ui.spacing().item_spacing.x * 4.0;
                     let scope_width = (ui.available_width() - utility_width).max(130.0);
                     ui.allocate_ui(egui::vec2(scope_width, 36.0), |ui| {
                         ui.set_width(scope_width);
@@ -682,18 +714,29 @@ impl VoidspaceApp {
                             &mut self.scope_text,
                             &mut self.volume_switcher,
                             &self.available_volumes,
+                            &volume_ids,
                             active_root,
+                            active_volume_id.as_deref(),
                             self.volume_refresh_in_flight,
                             self.volume_discovery_error.as_deref(),
                             &self.typography,
                         );
                     });
                     if compact {
+                        let filter_glyph = if self.filter_error.is_some() {
+                            "Q ERROR"
+                        } else if self.filter.is_some() {
+                            "Q ACTIVE"
+                        } else {
+                            "⌕"
+                        };
                         if ui
                             .add_sized(
-                                [42.0, 38.0],
-                                egui::Button::new(egui::RichText::new("⌕").color(hud::CYAN))
-                                    .fill(hud::PANEL_RAISED),
+                                [compact_filter_width, 38.0],
+                                egui::Button::new(
+                                    egui::RichText::new(filter_glyph).color(hud::CYAN),
+                                )
+                                .fill(hud::PANEL_RAISED),
                             )
                             .on_hover_text("Open filter")
                             .clicked()
@@ -756,6 +799,7 @@ impl VoidspaceApp {
                 });
             });
         if open_about {
+            self.volume_switcher.open = false;
             if self.overlays.transient() == Some(TransientOverlay::About) {
                 self.overlays.close_transient(root_ui.ctx());
             } else {
@@ -763,13 +807,32 @@ impl VoidspaceApp {
             }
         }
         if open_filter {
+            self.volume_switcher.open = false;
+            self.compact_filter_prior.clone_from(&self.filter_text);
+            self.compact_filter_draft.clone_from(&self.filter_text);
             self.overlays
                 .open_transient(TransientOverlay::CompactFilter, None);
         }
         match switcher_action {
             VolumeSwitcherAction::None => {}
-            VolumeSwitcherAction::Close => self.volume_switcher.open = false,
-            VolumeSwitcherAction::OpenOrActivate(path) => self.open_or_activate_scan(path),
+            VolumeSwitcherAction::Close => {
+                self.volume_switcher.open = false;
+                if self.overlays.transient() == Some(TransientOverlay::DiskPicker) {
+                    self.overlays.dismiss_transient();
+                }
+            }
+            VolumeSwitcherAction::OpenOrActivate(path) => {
+                self.volume_switcher.open = false;
+                if self.overlays.transient() == Some(TransientOverlay::DiskPicker) {
+                    self.overlays.dismiss_transient();
+                }
+                self.open_or_activate_scan(path);
+            }
+        }
+        if self.volume_switcher.open && !was_switcher_open {
+            self.tactical_arc = None;
+            self.overlays
+                .open_transient(TransientOverlay::DiskPicker, None);
         }
         if self.volume_switcher.open
             && (!was_switcher_open
@@ -791,6 +854,27 @@ impl VoidspaceApp {
                 self.filter_error = None;
             }
             Err(error) => self.filter_error = Some(error.to_string()),
+        }
+    }
+
+    fn apply_compact_filter(&mut self) -> bool {
+        if self.compact_filter_draft.trim().is_empty() {
+            self.filter_text.clear();
+            self.filter = None;
+            self.filter_error = None;
+            return true;
+        }
+        match parse(&self.compact_filter_draft) {
+            Ok(filter) => {
+                self.filter_text.clone_from(&self.compact_filter_draft);
+                self.filter = Some(filter);
+                self.filter_error = None;
+                true
+            }
+            Err(error) => {
+                self.filter_error = Some(error.to_string());
+                false
+            }
         }
     }
 
@@ -855,6 +939,7 @@ impl VoidspaceApp {
     }
 
     fn tab_bar(&mut self, root_ui: &mut egui::Ui) {
+        let interactive = !self.overlays.owns_pointer();
         let mut close_requested = None;
         egui::Panel::top("tabs")
             .exact_size(42.0)
@@ -865,6 +950,9 @@ impl VoidspaceApp {
                     .stroke(egui::Stroke::new(1.0, hud::HAIRLINE)),
             )
             .show(root_ui, |ui| {
+                if !interactive {
+                    ui.disable();
+                }
                 egui::ScrollArea::horizontal()
                     .id_salt("volume-tabs-overflow")
                     .show(ui, |ui| {
@@ -872,12 +960,15 @@ impl VoidspaceApp {
                             for (index, tab) in self.tabs.iter().enumerate() {
                                 let active = index == self.active_tab;
                                 let volume_id = self.volume_labels.label_for(&tab.root_path);
-                                let label = format!(
-                                    "{} / {} · {}",
-                                    volume_id,
-                                    tab.title,
-                                    if tab.scanning { "SCANNING" } else { "LIVE" }
-                                );
+                                let tab_state = if !tab.errors.is_empty() {
+                                    ("ERROR", hud::HudState::Danger)
+                                } else if tab.scanning {
+                                    ("SCANNING", hud::HudState::Warning)
+                                } else {
+                                    ("LIVE", hud::HudState::Active)
+                                };
+                                let label =
+                                    format!("{} / {} · {}", volume_id, tab.title, tab_state.0);
                                 let width =
                                     (label.chars().count() as f32 * 7.4 + 24.0).clamp(82.0, 230.0);
                                 ui.spacing_mut().item_spacing.x = 0.0;
@@ -898,6 +989,14 @@ impl VoidspaceApp {
                                     )
                                     .fill(fill)
                                     .stroke(egui::Stroke::NONE),
+                                );
+                                hud::paint_state_square(
+                                    ui.painter(),
+                                    egui::pos2(
+                                        response.rect.left() + 5.0,
+                                        response.rect.center().y - 3.0,
+                                    ),
+                                    tab_state.1,
                                 );
                                 let close = ui
                                     .add_sized(
@@ -1099,24 +1198,6 @@ impl VoidspaceApp {
                     ui.ctx().copy_text(selected_path.display().to_string());
                 }
             });
-            if selected != tab.snapshot.root {
-                ui.horizontal(|ui| {
-                    if ui.button("RECYCLE").clicked() {
-                        action = Some(InspectorAction::Recycle(selected_path.clone()));
-                    }
-                    if ui
-                        .add(
-                            egui::Button::new(
-                                egui::RichText::new("DELETE FOREVER").color(theme::ORANGE),
-                            )
-                            .stroke(egui::Stroke::new(1.0, theme::ORANGE)),
-                        )
-                        .clicked()
-                    {
-                        action = Some(InspectorAction::Permanent(selected_path));
-                    }
-                });
-            }
             ui.add_space(10.0);
             ui.label(
                 egui::RichText::new("Click a folder to keep drilling · double-click to zoom")
@@ -1172,6 +1253,9 @@ impl VoidspaceApp {
             egui::CentralPanel::default()
                 .frame(egui::Frame::new().fill(theme::BG))
                 .show(root_ui, |ui| {
+                    if self.overlays.owns_pointer() {
+                        ui.disable();
+                    }
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         ui.add_space(42.0);
                         let available_width = ui.available_width();
@@ -1232,14 +1316,51 @@ impl VoidspaceApp {
                                     let card_width = (content_width
                                         - VOLUME_CARD_GAP * (columns.saturating_sub(1) as f32))
                                         / columns as f32;
+                                    let volume_ids = self
+                                        .available_volumes
+                                        .iter()
+                                        .map(|volume| {
+                                            self.volume_labels.label_for(&volume.root_path)
+                                        })
+                                        .collect::<Vec<_>>();
+                                    let volume_states = self
+                                        .available_volumes
+                                        .iter()
+                                        .map(|volume| {
+                                            volume_switcher::matching_volume_tab_index(
+                                                self.tabs.iter().map(|tab| tab.root_path.as_path()),
+                                                &volume.root_path,
+                                            )
+                                            .map_or("START SCAN", |index| {
+                                                let tab = &self.tabs[index];
+                                                if !tab.errors.is_empty() {
+                                                    "ERROR"
+                                                } else if tab.scanning {
+                                                    "SCANNING"
+                                                } else {
+                                                    "OPEN TAB"
+                                                }
+                                            })
+                                        })
+                                        .collect::<Vec<_>>();
                                     egui::Grid::new("volume_picker_grid")
                                         .num_columns(columns)
                                         .spacing([VOLUME_CARD_GAP, VOLUME_CARD_GAP])
                                         .show(ui, |ui| {
-                                            for (index, volume) in
-                                                self.available_volumes.iter().enumerate()
+                                            for (index, ((volume, volume_id), volume_state)) in self
+                                                .available_volumes
+                                                .iter()
+                                                .zip(&volume_ids)
+                                                .zip(&volume_states)
+                                                .enumerate()
                                             {
-                                                if volume_card(ui, volume, card_width) {
+                                                if volume_card(
+                                                    ui,
+                                                    volume,
+                                                    volume_id,
+                                                    volume_state,
+                                                    card_width,
+                                                ) {
                                                     scan_root = Some(volume.root_path.clone());
                                                 }
                                                 if (index + 1) % columns == 0 {
@@ -1288,9 +1409,11 @@ impl VoidspaceApp {
             self.details_drawer = false;
         }
         let suppress_treemap = self.overlays.owns_pointer();
+        let inspector_enabled = !self.overlays.owns_pointer();
         let tab = &mut self.tabs[self.active_tab];
         let mut inspector_action = None;
         let mut pending_context_target = None;
+        let mut tactical_work_area = None;
         let mut open_inspector_drawer = false;
         if mode == WorkspaceMode::Docked {
             egui::Panel::right("inspector")
@@ -1302,8 +1425,10 @@ impl VoidspaceApp {
                         .stroke(egui::Stroke::new(1.0, hud::HAIRLINE)),
                 )
                 .show(root_ui, |ui| {
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        inspector_action = Self::inspector(ui, tab);
+                    ui.add_enabled_ui(inspector_enabled, |ui| {
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            inspector_action = Self::inspector(ui, tab);
+                        });
                     });
                 });
         }
@@ -1387,7 +1512,7 @@ impl VoidspaceApp {
                 if !response.aggregate_still_valid {
                     tab.treemap_state.aggregate = None;
                 }
-                if let Some((target, origin_focus)) = response.context_target {
+                if let Some((target, origin_focus, keyboard_open)) = response.context_target {
                     tab.treemap_state.selected = Some(target);
                     tab.treemap_state.aggregate = None;
                     if let Some(node) = tab.snapshot.node(target) {
@@ -1395,12 +1520,16 @@ impl VoidspaceApp {
                             scan_id: tab.snapshot.scan_id,
                             generation: tab.snapshot.generation,
                             node_id: target,
+                            identity: node.identity.clone(),
                             path: path_for_node(tab, target),
-                            is_directory: node.kind == NodeKind::Directory,
+                            kind: node.kind,
                             root: tab.root_path.clone(),
                             view_root,
+                            display_name: node.name.display_escaped(),
+                            display_size: treemap::compact_bytes(node.allocated),
                             origin_focus,
                         });
+                        tactical_work_area = Some((available, keyboard_open));
                     }
                 }
                 if let Some(action) = response.action {
@@ -1444,13 +1573,15 @@ impl VoidspaceApp {
                 .input(|input| input.pointer.interact_pos())
                 .unwrap_or_else(|| context.content_rect().center());
             let origin_focus = target.origin_focus;
-            self.tactical_arc = Some(TacticalArcState::new(
-                target,
-                pointer,
-                context.content_rect(),
-            ));
-            self.overlays
-                .open_transient(TransientOverlay::TacticalArc, Some(origin_focus));
+            let (work_area, keyboard_open) =
+                tactical_work_area.unwrap_or((context.content_rect(), false));
+            if let Some(arc) = TacticalArcState::new(target, pointer, work_area, keyboard_open) {
+                self.tactical_arc = Some(arc);
+                self.overlays
+                    .open_transient(TransientOverlay::TacticalArc, Some(origin_focus));
+            } else {
+                self.toast = Some("WINDOW TOO SMALL FOR COMMAND MENU".to_owned());
+            }
         }
         if let Some(action) = inspector_action {
             self.handle_inspector_action(action);
@@ -1476,8 +1607,7 @@ impl VoidspaceApp {
             InspectorAction::ShowVolumePicker => {
                 self.volume_picker_visible = true;
                 self.details_drawer = false;
-                self.overlays
-                    .open_transient(TransientOverlay::DiskPicker, None);
+                self.overlays.dismiss_transient();
             }
         }
     }
@@ -1589,7 +1719,7 @@ impl VoidspaceApp {
     }
 
     fn tactical_target_is_current(&self, target: &ContextTarget) -> bool {
-        self.tabs.iter().any(|tab| {
+        self.tabs.get(self.active_tab).is_some_and(|tab| {
             let current_view_root = tab.treemap_state.aggregate_views.last().map_or_else(
                 || tab.treemap_state.view_path.current(),
                 |group| group.parent,
@@ -1599,7 +1729,8 @@ impl VoidspaceApp {
                 && tab.root_path == target.root
                 && current_view_root == target.view_root
                 && tab.snapshot.node(target.node_id).is_some_and(|node| {
-                    (node.kind == NodeKind::Directory) == target.is_directory
+                    node.identity == target.identity
+                        && node.kind == target.kind
                         && path_for_node(tab, target.node_id) == target.path
                 })
         })
@@ -1624,7 +1755,27 @@ impl VoidspaceApp {
     }
 
     fn show_transient_overlays(&mut self, context: &egui::Context) {
+        let transient = self.overlays.transient();
+        let escape_pressed = context.input(|input| input.key_pressed(egui::Key::Escape));
+        if escape_pressed && transient == Some(TransientOverlay::CompactFilter) {
+            self.filter_text.clone_from(&self.compact_filter_prior);
+            self.reparse_filter();
+            self.overlays.close_transient(context);
+            return;
+        }
         let _ = self.overlays.route_escape(context);
+        let just_opened = self.overlays.take_transient_just_opened();
+        if self.overlays.transient() == Some(TransientOverlay::TacticalArc)
+            && self
+                .tactical_arc
+                .as_ref()
+                .is_some_and(|arc| !self.tactical_target_is_current(&arc.target))
+        {
+            self.tactical_arc = None;
+            self.overlays.close_transient(context);
+            self.toast = Some("TARGET CHANGED · OPEN AGAIN".to_owned());
+            return;
+        }
         if self.overlays.transient() != Some(TransientOverlay::TacticalArc) {
             self.tactical_arc = None;
         }
@@ -1652,7 +1803,7 @@ impl VoidspaceApp {
             }
             Some(TransientOverlay::About) => {
                 let mut open = true;
-                egui::Window::new("ABOUT / VOIDSPACE")
+                let shown = egui::Window::new("ABOUT / VOIDSPACE")
                     .id(egui::Id::new("voidspace-about"))
                     .open(&mut open)
                     .collapsible(false)
@@ -1664,15 +1815,27 @@ impl VoidspaceApp {
                             .inner_margin(egui::Margin::same(18)),
                     )
                     .show(context, |ui| {
-                        ui.set_min_width(410.0);
+                        ui.set_min_width(500.0);
                         ui.label(theme::brand_wordmark(&self.typography));
                         ui.label(
                             egui::RichText::new("FAST NATIVE DISK INTELLIGENCE / WINDOWS")
                                 .font(self.typography.font(theme::TypographyToken::DataCompact))
                                 .color(hud::CYAN),
                         );
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "VERSION {} / NATIVE RUST",
+                                env!("CARGO_PKG_VERSION")
+                            ))
+                            .font(self.typography.font(theme::TypographyToken::DataMicro))
+                            .color(theme::MUTED),
+                        );
                         ui.add_space(16.0);
-                        ui.label("Автор · Евгений «Chip» Юрченко");
+                        ui.label("Created by Евгений «Chip» Юрченко");
+                        ui.label(
+                            egui::RichText::new("AI, рынки, агенты · Человек 2.0")
+                                .color(theme::MUTED),
+                        );
                         ui.separator();
                         for &(label, url) in ABOUT_LINKS {
                             ui.horizontal(|ui| {
@@ -1687,14 +1850,15 @@ impl VoidspaceApp {
                             });
                         }
                     });
-                if !open {
+                let rect = shown.map(|response| response.response.rect);
+                if !open || clicked_outside(context, rect, just_opened) {
                     self.overlays.close_transient(context);
                 }
             }
             Some(TransientOverlay::CompactFilter) => {
                 let mut open = true;
-                let mut changed = false;
-                egui::Window::new("FILTER / QUERY")
+                let mut apply = false;
+                let shown = egui::Window::new("FILTER / QUERY")
                     .id(egui::Id::new("compact-filter"))
                     .open(&mut open)
                     .collapsible(false)
@@ -1706,25 +1870,43 @@ impl VoidspaceApp {
                             .inner_margin(egui::Margin::same(14)),
                     )
                     .show(context, |ui| {
-                        changed = ui
-                            .add_sized(
-                                [420.0, 38.0],
-                                egui::TextEdit::singleline(&mut self.filter_text)
-                                    .hint_text("size > 1GiB AND NOT attr:system")
-                                    .font(self.typography.font(theme::TypographyToken::DataNormal)),
-                            )
-                            .changed();
+                        let response = ui.add_sized(
+                            [420.0, 38.0],
+                            egui::TextEdit::singleline(&mut self.compact_filter_draft)
+                                .hint_text("size > 1GiB AND NOT attr:system")
+                                .font(self.typography.font(theme::TypographyToken::DataNormal)),
+                        );
+                        response.request_focus();
+                        if ui.input(|input| input.key_pressed(egui::Key::Enter)) {
+                            apply = true;
+                        }
+                        if let Some(error) = &self.filter_error {
+                            ui.label(
+                                egui::RichText::new(format!("QUERY ERROR / {error}"))
+                                    .font(self.typography.font(theme::TypographyToken::DataMicro))
+                                    .color(hud::ORANGE),
+                            );
+                        }
                     });
-                if changed {
-                    self.reparse_filter();
+                let rect = shown.map(|response| response.response.rect);
+                if clicked_outside(context, rect, just_opened) {
+                    apply = true;
                 }
                 if !open {
+                    self.filter_text.clone_from(&self.compact_filter_prior);
+                    self.reparse_filter();
+                    self.overlays.close_transient(context);
+                } else if apply && self.apply_compact_filter() {
                     self.overlays.close_transient(context);
                 }
             }
             Some(TransientOverlay::StatusDetails) => {
-                let modules = self.status_modules();
-                if !status_bar::show_details(context, &self.typography, &modules) {
+                let (open, rect) = status_bar::show_details(
+                    context,
+                    &self.typography,
+                    &self.status_detail_modules,
+                );
+                if !open || clicked_outside(context, rect, just_opened) {
                     self.overlays.close_transient(context);
                 }
             }
@@ -1733,6 +1915,7 @@ impl VoidspaceApp {
     }
 
     fn status_bar(&mut self, root_ui: &mut egui::Ui) {
+        let interactive = !self.overlays.owns_pointer();
         let geometry = status_bar_geometry();
         let modules = self.status_modules();
         let mut open_more = None;
@@ -1745,10 +1928,14 @@ impl VoidspaceApp {
                     .inner_margin(egui::Margin::symmetric(10, geometry.vertical_margin)),
             )
             .show(root_ui, |ui| {
+                if !interactive {
+                    ui.disable();
+                }
                 ui.set_min_height(geometry.content_height());
                 open_more = status_bar::show(ui, &self.typography, &modules);
             });
-        if let Some(focus) = open_more {
+        if let Some((focus, hidden)) = open_more {
+            self.status_detail_modules = hidden;
             self.overlays
                 .open_transient(TransientOverlay::StatusDetails, Some(focus));
         }
@@ -1853,8 +2040,25 @@ fn apply_volume_refresh(
     }
 }
 
+fn clicked_outside(context: &egui::Context, rect: Option<egui::Rect>, just_opened: bool) -> bool {
+    if just_opened {
+        return false;
+    }
+    context.input(|input| {
+        input.pointer.primary_clicked()
+            && input
+                .pointer
+                .interact_pos()
+                .is_some_and(|position| rect.is_none_or(|rect| !rect.contains(position)))
+    })
+}
+
 fn treemap_navigation(ui: &mut egui::Ui, tab: &ScanTab) -> NavigationIntent {
     let mut intent = NavigationIntent::None;
+    let path = tab.treemap_state.view_path.as_slice();
+    let available_for_segments = (ui.available_width() - 116.0).max(160.0);
+    let max_visible = ((available_for_segments / 112.0).floor() as usize).clamp(2, 6);
+    let visible = collapsed_breadcrumb_indices(path.len(), max_visible);
     ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new("NAV / PATH")
@@ -1865,7 +2069,7 @@ fn treemap_navigation(ui: &mut egui::Ui, tab: &ScanTab) -> NavigationIntent {
         if ui
             .add(
                 egui::Button::new(
-                    egui::RichText::new("← BACK")
+                    egui::RichText::new("← LVL-1")
                         .monospace()
                         .size(10.0)
                         .color(theme::TEXT),
@@ -1877,32 +2081,34 @@ fn treemap_navigation(ui: &mut egui::Ui, tab: &ScanTab) -> NavigationIntent {
         {
             intent = NavigationIntent::Back;
         }
-        for (index, node_id) in tab
-            .treemap_state
-            .view_path
-            .as_slice()
-            .iter()
-            .copied()
-            .enumerate()
-        {
-            if index > 0 {
-                ui.label(egui::RichText::new("›").color(theme::MUTED));
+        for (slot, index) in visible.into_iter().enumerate() {
+            if slot > 0 {
+                ui.label(egui::RichText::new("//").color(theme::MUTED));
             }
+            let Some(index) = index else {
+                ui.label(egui::RichText::new("…").monospace().color(theme::MUTED));
+                continue;
+            };
+            let node_id = path[index];
             let label = tab
                 .snapshot
                 .node(node_id)
                 .map(|node| node.name.display_escaped())
                 .map(|label| truncate_volume_label(&label, 26))
                 .unwrap_or_else(|| "?".into());
-            if index + 1 == tab.treemap_state.view_path.as_slice().len() {
-                ui.label(
+            let current = index + 1 == path.len();
+            let response = ui.add(
+                egui::Button::new(
                     egui::RichText::new(label)
                         .monospace()
                         .size(10.0)
-                        .color(hud::ORANGE)
+                        .color(if current { hud::ORANGE } else { theme::TEXT })
                         .strong(),
-                );
-            } else if ui.link(label).clicked() {
+                )
+                .fill(hud::PANEL_RAISED)
+                .stroke(egui::Stroke::new(1.0, hud::HAIRLINE)),
+            );
+            if response.clicked() {
                 intent = NavigationIntent::Jump(node_id);
             }
         }
@@ -1916,6 +2122,18 @@ fn treemap_navigation(ui: &mut egui::Ui, tab: &ScanTab) -> NavigationIntent {
         }
     });
     intent
+}
+
+fn collapsed_breadcrumb_indices(length: usize, max_visible: usize) -> Vec<Option<usize>> {
+    if length <= max_visible || length <= 2 {
+        return (0..length).map(Some).collect();
+    }
+    let tail_count = max_visible.saturating_sub(1).max(1);
+    let mut result = Vec::with_capacity(tail_count + 2);
+    result.push(Some(0));
+    result.push(None);
+    result.extend((length - tail_count..length).map(Some));
+    result
 }
 
 fn back_destination(view_path_len: usize, aggregate_views_len: usize) -> BackDestination {
@@ -1996,7 +2214,13 @@ fn empty_volume_message(ui: &mut egui::Ui, title: &str, detail: &str) {
         });
 }
 
-fn volume_card(ui: &mut egui::Ui, volume: &volume::VolumeInfo, width: f32) -> bool {
+fn volume_card(
+    ui: &mut egui::Ui,
+    volume: &volume::VolumeInfo,
+    volume_id: &str,
+    volume_state: &str,
+    width: f32,
+) -> bool {
     use egui::{Align2, FontFamily, FontId, Sense, WidgetInfo, WidgetType};
 
     let (mut response, painter) =
@@ -2012,7 +2236,7 @@ fn volume_card(ui: &mut egui::Ui, volume: &volume::VolumeInfo, width: f32) -> bo
     let used = volume.usage.used();
     let percentage = volume::used_percentage(volume.usage);
     let accessible_label = format!(
-        "{} {}, total {}, free {}",
+        "{volume_id}, {} {}, total {}, free {}, {volume_state}",
         volume.display_root,
         volume.label,
         volume::format_decimal_bytes(volume.usage.total),
@@ -2051,6 +2275,13 @@ fn volume_card(ui: &mut egui::Ui, volume: &volume::VolumeInfo, width: f32) -> bo
         } else {
             hud::HudState::Active
         },
+    );
+    painter.text(
+        rect.left_top() + egui::vec2(18.0, 8.0),
+        Align2::LEFT_TOP,
+        volume_id,
+        FontId::new(9.0, FontFamily::Monospace),
+        hud::CYAN,
     );
 
     let inner = rect.shrink(18.0);
@@ -2092,6 +2323,19 @@ fn volume_card(ui: &mut egui::Ui, volume: &volume::VolumeInfo, width: f32) -> bo
         format!("{percentage}% USED"),
         monospace(10.0),
         theme::MUTED,
+    );
+    painter.text(
+        egui::pos2(inner.right(), inner.top() + 61.0),
+        Align2::RIGHT_TOP,
+        volume_state,
+        monospace(10.0),
+        if volume_state == "ERROR" {
+            hud::MAGENTA
+        } else if volume_state == "START SCAN" {
+            hud::CYAN
+        } else {
+            hud::LIME
+        },
     );
 
     let track = egui::Rect::from_min_max(
@@ -2363,7 +2607,7 @@ mod tab_close_tests {
 
 #[cfg(test)]
 mod back_navigation_tests {
-    use super::{BackDestination, back_destination};
+    use super::{BackDestination, back_destination, collapsed_breadcrumb_indices};
 
     #[test]
     fn back_from_the_scan_root_opens_the_volume_picker() {
@@ -2374,6 +2618,14 @@ mod back_navigation_tests {
     fn back_inside_the_treemap_returns_to_the_parent() {
         assert_eq!(back_destination(2, 0), BackDestination::Parent);
         assert_eq!(back_destination(1, 1), BackDestination::Parent);
+    }
+
+    #[test]
+    fn deep_breadcrumb_preserves_root_and_current_with_one_middle_collapse() {
+        assert_eq!(
+            collapsed_breadcrumb_indices(8, 4),
+            vec![Some(0), None, Some(5), Some(6), Some(7)]
+        );
     }
 }
 

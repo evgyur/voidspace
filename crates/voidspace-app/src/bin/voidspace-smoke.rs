@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use anyhow::{Context, bail};
 use crossbeam_channel::bounded;
@@ -12,6 +13,12 @@ use voidspace_scan::{ScanRequest, describe_root, start};
 
 fn main() -> anyhow::Result<()> {
     let arguments: Vec<String> = std::env::args().collect();
+    if arguments
+        .get(1)
+        .is_some_and(|value| value == "--hud-benchmark")
+    {
+        return hud_benchmark();
+    }
     if arguments
         .get(1)
         .is_some_and(|value| value == "--typography")
@@ -71,6 +78,69 @@ fn main() -> anyhow::Result<()> {
             "errors": stats.errors.len(),
         })
     );
+    Ok(())
+}
+
+fn hud_benchmark() -> anyhow::Result<()> {
+    const WARM_UP: usize = 60;
+    const MEASURED: usize = 600;
+    let context = egui::Context::default();
+    let render = || {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1920.0, 1080.0),
+            )),
+            ..Default::default()
+        };
+        let _ = context.run_ui(input, |ui| {
+            let painter = ui.painter();
+            let origin = ui.max_rect().min;
+            for index in 0..1024 {
+                let column = index % 32;
+                let row = index / 32;
+                let rect = egui::Rect::from_min_size(
+                    origin + egui::vec2(column as f32 * 58.0, row as f32 * 32.0),
+                    egui::vec2(56.0, 30.0),
+                );
+                voidspace_app::hud::paint_cut_frame(
+                    painter,
+                    rect,
+                    voidspace_app::hud::PANEL,
+                    egui::Stroke::new(1.0, voidspace_app::hud::HAIRLINE),
+                    6.0,
+                );
+            }
+        });
+    };
+    for _ in 0..WARM_UP {
+        render();
+    }
+    let mut samples = Vec::with_capacity(MEASURED);
+    for _ in 0..MEASURED {
+        let started = Instant::now();
+        render();
+        samples.push(started.elapsed().as_secs_f64() * 1000.0);
+    }
+    samples.sort_by(f64::total_cmp);
+    let median_ms = samples[samples.len() / 2];
+    let p95_ms = samples[((samples.len() - 1) as f64 * 0.95).round() as usize];
+    println!(
+        "{}",
+        serde_json::json!({
+            "fixture_tiles": 1024,
+            "warm_up_frames": WARM_UP,
+            "measured_frames": MEASURED,
+            "median_ms": median_ms,
+            "p95_ms": p95_ms,
+            "idle_autonomous_repaint": voidspace_app::hud::hud_requires_autonomous_repaint(
+                voidspace_app::hud::HudMotionState::Idle
+            ),
+        })
+    );
+    if p95_ms >= 16.7 {
+        bail!("HUD render p95 {p95_ms:.3} ms exceeded 16.7 ms");
+    }
     Ok(())
 }
 

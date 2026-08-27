@@ -42,6 +42,8 @@ pub const ABOUT_LINKS: &[(&str, &str)] = &[
     ("X", "https://x.com/chip1cr"),
     ("WEBSITE", "https://evgyur.pro"),
     ("HUMAN 2.0", "https://human20.app"),
+    ("HUMAN 2.0 TG", "https://t.me/human20"),
+    ("HYPERLIQUID RU", "https://t.me/hyperliquid_ru"),
 ];
 
 #[cfg(test)]
@@ -60,5 +62,7 @@ mod tests {
     fn about_contains_verified_author_links() {
         assert!(ABOUT_LINKS.contains(&("TELEGRAM", "https://t.me/chipda")));
         assert!(ABOUT_LINKS.contains(&("WEBSITE", "https://evgyur.pro")));
+        assert!(ABOUT_LINKS.contains(&("HUMAN 2.0 TG", "https://t.me/human20")));
+        assert!(ABOUT_LINKS.contains(&("HYPERLIQUID RU", "https://t.me/hyperliquid_ru")));
     }
 }
