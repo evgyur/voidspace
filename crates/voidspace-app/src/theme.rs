@@ -118,6 +118,30 @@ impl Typography {
     }
 }
 
+pub(crate) fn brand_wordmark(typography: &Typography) -> egui::text::LayoutJob {
+    let mut wordmark = egui::text::LayoutJob::default();
+    let font_id = typography.font(TypographyToken::DisplayBrand);
+    wordmark.append(
+        "VOID",
+        0.0,
+        egui::TextFormat {
+            font_id: font_id.clone(),
+            color: ORANGE,
+            ..Default::default()
+        },
+    );
+    wordmark.append(
+        "SPACE",
+        0.0,
+        egui::TextFormat {
+            font_id,
+            color: TEXT,
+            ..Default::default()
+        },
+    );
+    wordmark
+}
+
 fn validate(bytes: &'static [u8], expected_sha: &str, weights: &[f32]) -> Result<(), String> {
     let actual = format!("{:x}", Sha256::digest(bytes));
     if actual != expected_sha {
@@ -326,5 +350,20 @@ mod typography_tests {
             assert_eq!(chain.first().map(String::as_str), Some(family));
             assert!(chain.len() > 1, "{family} has no glyph fallback");
         }
+    }
+
+    #[test]
+    fn wordmark_preserves_the_approved_two_color_split() {
+        let typography = Typography::for_test(TypographySource::EmbeddedSelected, 1.0);
+        let wordmark = brand_wordmark(&typography);
+
+        assert_eq!(wordmark.text, "VOIDSPACE");
+        assert_eq!(wordmark.sections.len(), 2);
+        assert_eq!(wordmark.sections[0].byte_range.start.0, 0);
+        assert_eq!(wordmark.sections[0].byte_range.end.0, 4);
+        assert_eq!(wordmark.sections[0].format.color, ORANGE);
+        assert_eq!(wordmark.sections[1].byte_range.start.0, 4);
+        assert_eq!(wordmark.sections[1].byte_range.end.0, 9);
+        assert_eq!(wordmark.sections[1].format.color, TEXT);
     }
 }

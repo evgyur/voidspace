@@ -469,11 +469,7 @@ impl VoidspaceApp {
                 ui.horizontal(|ui| {
                     ui.add_sized(
                         [68.0, 36.0],
-                        egui::Label::new(
-                            egui::RichText::new("VOIDSPACE")
-                                .color(theme::ORANGE)
-                                .font(self.typography.font(theme::TypographyToken::DisplayBrand)),
-                        ),
+                        egui::Label::new(theme::brand_wordmark(&self.typography)),
                     );
                     let compact = ui.available_width() < 820.0;
                     let turbo_width = if compact { 112.0 } else { 132.0 };

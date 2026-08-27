@@ -1,0 +1,2 @@
+*.ttf binary
+crates/voidspace-app/assets/licenses/fonts/**/*.txt text eol=lf
