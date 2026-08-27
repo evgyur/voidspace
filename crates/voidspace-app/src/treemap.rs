@@ -491,7 +491,16 @@ impl PreviewState {
 
 pub struct TreemapResponse {
     pub action: Option<TreemapAction>,
+    pub context_target: Option<NodeId>,
+    pub context_action: Option<TreemapContextAction>,
     pub aggregate_still_valid: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TreemapContextAction {
+    Reveal(NodeId),
+    Recycle(NodeId),
+    Permanent(NodeId),
 }
 
 #[derive(Clone, Debug)]
@@ -897,11 +906,50 @@ pub fn show(ui: &mut Ui, request: ShowRequest<'_>) -> TreemapResponse {
     let base_responses = hit_responses(ui, base_layout.root, base_hits);
     let nested_responses = hit_responses(ui, base_layout.root, nested_hits);
     let mut action = None;
+    let mut context_target = None;
+    let mut context_action = None;
     for (hit, tile_response) in nested_responses
         .iter()
         .rev()
         .chain(base_responses.iter().rev())
     {
+        if let Some(node_id) = file_action_target(hit) {
+            if tile_response.secondary_clicked() {
+                context_target = Some(node_id);
+            }
+            tile_response.context_menu(|ui| {
+                ui.set_min_width(250.0);
+                ui.label(egui::RichText::new(&hit.name).strong().color(theme::TEXT));
+                ui.label(
+                    egui::RichText::new(&hit.formatted_size)
+                        .monospace()
+                        .small()
+                        .color(theme::MUTED),
+                );
+                ui.separator();
+                if ui.button("OPEN IN EXPLORER").clicked() {
+                    context_action = Some(TreemapContextAction::Reveal(node_id));
+                    ui.close();
+                }
+                if ui.button("MOVE TO RECYCLE BIN").clicked() {
+                    context_action = Some(TreemapContextAction::Recycle(node_id));
+                    ui.close();
+                }
+                ui.separator();
+                if ui
+                    .add(
+                        egui::Button::new(
+                            egui::RichText::new("DELETE WITHOUT RECOVERY").color(theme::ORANGE),
+                        )
+                        .stroke(egui::Stroke::new(1.0, theme::ORANGE)),
+                    )
+                    .clicked()
+                {
+                    context_action = Some(TreemapContextAction::Permanent(node_id));
+                    ui.close();
+                }
+            });
+        }
         let keyboard_zoom = tile_response.has_focus()
             && ui.input(|input| input.modifiers.ctrl && input.key_pressed(egui::Key::Enter));
         let keyboard_activate = tile_response.has_focus()
@@ -930,8 +978,14 @@ pub fn show(ui: &mut Ui, request: ShowRequest<'_>) -> TreemapResponse {
 
     TreemapResponse {
         action,
+        context_target,
+        context_action,
         aggregate_still_valid: aggregate_is_still_valid(open_aggregate, &rendered_aggregates),
     }
+}
+
+fn file_action_target(hit: &VisibleHit) -> Option<NodeId> {
+    (!hit.aggregated).then_some(hit.node_id)
 }
 
 fn hit_responses(
@@ -1225,6 +1279,27 @@ mod interaction_tests {
         assert!(!nested_layer_accepts_click(None));
         assert!(nested_layer_accepts_click(Some(0)));
         assert!(nested_layer_accepts_click(Some(7)));
+    }
+
+    #[test]
+    fn context_file_actions_are_available_only_for_real_nodes() {
+        let real = VisibleHit {
+            node_id: NodeId(41),
+            rect: Rect::NOTHING,
+            depth: 1,
+            aggregated: false,
+            expandable: false,
+            name: "real".into(),
+            formatted_size: "1.0G".into(),
+            aggregate_members: Vec::new(),
+        };
+        let aggregate = VisibleHit {
+            aggregated: true,
+            ..real.clone()
+        };
+
+        assert_eq!(file_action_target(&real), Some(NodeId(41)));
+        assert_eq!(file_action_target(&aggregate), None);
     }
 
     #[test]

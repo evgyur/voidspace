@@ -722,7 +722,30 @@ impl VoidspaceApp {
         }
     }
 
+    fn close_tab(&mut self, index: usize) {
+        if index >= self.tabs.len() {
+            return;
+        }
+        let previous_len = self.tabs.len();
+        let mut tab = self.tabs.remove(index);
+        if let Some(scan) = tab.scan.take() {
+            scan.cancel();
+        }
+        if let Some(watcher) = tab.watcher.take() {
+            watcher.stop();
+        }
+        self.active_tab =
+            active_index_after_close(previous_len, self.active_tab, index).unwrap_or(0);
+        if let Some(active) = self.tabs.get(self.active_tab) {
+            self.scope_text = active.root_path.display().to_string();
+        } else {
+            self.scope_text.clear();
+            self.details_drawer = false;
+        }
+    }
+
     fn tab_bar(&mut self, root_ui: &mut egui::Ui) {
+        let mut close_requested = None;
         egui::Panel::top("tabs")
             .exact_size(38.0)
             .frame(
@@ -739,7 +762,13 @@ impl VoidspaceApp {
                         } else {
                             format!("{} · LIVE", tab.title)
                         };
-                        let width = (label.chars().count() as f32 * 7.4 + 30.0).clamp(92.0, 260.0);
+                        let width = (label.chars().count() as f32 * 7.4 + 24.0).clamp(82.0, 230.0);
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        let fill = if active {
+                            theme::RAISED
+                        } else {
+                            theme::SURFACE
+                        };
                         let response = ui.add_sized(
                             [width, 31.0],
                             egui::Button::new(
@@ -747,25 +776,42 @@ impl VoidspaceApp {
                                     .font(self.typography.font(theme::TypographyToken::UiControl))
                                     .color(if active { theme::TEXT } else { theme::MUTED }),
                             )
-                            .fill(if active {
-                                theme::RAISED
-                            } else {
-                                theme::SURFACE
-                            })
+                            .fill(fill)
                             .stroke(egui::Stroke::NONE),
                         );
+                        let close = ui
+                            .add_sized(
+                                [30.0, 31.0],
+                                egui::Button::new(
+                                    egui::RichText::new("×").size(18.0).color(if active {
+                                        theme::TEXT
+                                    } else {
+                                        theme::MUTED
+                                    }),
+                                )
+                                .fill(fill)
+                                .stroke(egui::Stroke::NONE),
+                            )
+                            .on_hover_text(format!("Close {}", tab.title));
                         if active {
                             ui.painter().line_segment(
-                                [response.rect.left_bottom(), response.rect.right_bottom()],
+                                [response.rect.left_bottom(), close.rect.right_bottom()],
                                 egui::Stroke::new(2.0, theme::ORANGE),
                             );
                         }
                         if response.clicked() {
                             self.active_tab = index;
                         }
+                        if close.clicked() {
+                            close_requested = Some(index);
+                        }
+                        ui.add_space(4.0);
                     }
                 });
             });
+        if let Some(index) = close_requested {
+            self.close_tab(index);
+        }
     }
 
     fn inspector(ui: &mut egui::Ui, tab: &mut ScanTab) -> Option<InspectorAction> {
@@ -1199,6 +1245,25 @@ impl VoidspaceApp {
                 if !response.aggregate_still_valid {
                     tab.treemap_state.aggregate = None;
                 }
+                if let Some(target) = response.context_target {
+                    tab.treemap_state.selected = Some(target);
+                    tab.treemap_state.aggregate = None;
+                }
+                if let Some(action) = response.context_action {
+                    let target = match action {
+                        treemap::TreemapContextAction::Reveal(id)
+                        | treemap::TreemapContextAction::Recycle(id)
+                        | treemap::TreemapContextAction::Permanent(id) => id,
+                    };
+                    let path = path_for_node(tab, target);
+                    inspector_action = Some(match action {
+                        treemap::TreemapContextAction::Reveal(_) => InspectorAction::Reveal(path),
+                        treemap::TreemapContextAction::Recycle(_) => InspectorAction::Recycle(path),
+                        treemap::TreemapContextAction::Permanent(_) => {
+                            InspectorAction::Permanent(path)
+                        }
+                    });
+                }
                 if let Some(action) = response.action {
                     tab.apply_treemap_action(action);
                 }
@@ -1487,6 +1552,23 @@ fn volume_grid_columns(available_width: f32) -> usize {
     (((available_width + VOLUME_CARD_GAP) / (VOLUME_CARD_MIN_WIDTH + VOLUME_CARD_GAP)).floor()
         as usize)
         .clamp(1, 4)
+}
+
+fn active_index_after_close(tab_count: usize, active: usize, closed: usize) -> Option<usize> {
+    if tab_count == 0 || closed >= tab_count {
+        return None;
+    }
+    let remaining = tab_count - 1;
+    if remaining == 0 {
+        return None;
+    }
+    Some(if active > closed {
+        active - 1
+    } else if active == closed {
+        closed.min(remaining - 1)
+    } else {
+        active.min(remaining - 1)
+    })
 }
 
 fn truncate_volume_label(label: &str, max_characters: usize) -> String {
@@ -1844,5 +1926,27 @@ mod volume_picker_tests {
         apply_volume_refresh(&mut cache, &mut error, Ok(vec![volume("D:")]));
         assert_eq!(cache, vec![volume("D:")]);
         assert_eq!(error, None);
+    }
+}
+
+#[cfg(test)]
+mod tab_close_tests {
+    use super::active_index_after_close;
+
+    #[test]
+    fn closing_the_active_tab_selects_the_nearest_survivor() {
+        assert_eq!(active_index_after_close(3, 1, 1), Some(1));
+        assert_eq!(active_index_after_close(3, 2, 2), Some(1));
+    }
+
+    #[test]
+    fn closing_a_tab_before_the_active_one_repairs_the_index() {
+        assert_eq!(active_index_after_close(4, 3, 1), Some(2));
+        assert_eq!(active_index_after_close(4, 0, 3), Some(0));
+    }
+
+    #[test]
+    fn closing_the_last_tab_returns_to_the_volume_picker() {
+        assert_eq!(active_index_after_close(1, 0, 0), None);
     }
 }

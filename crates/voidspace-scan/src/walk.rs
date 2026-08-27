@@ -1,5 +1,5 @@
 use std::{
-    collections::hash_map::DefaultHasher,
+    collections::{VecDeque, hash_map::DefaultHasher},
     fs,
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
@@ -180,9 +180,9 @@ fn run_scan(
         return stats;
     }
     sequence += 1;
-    let mut stack = vec![(root.path.clone(), root.identity.clone())];
+    let mut pending = VecDeque::from([(root.path.clone(), root.identity.clone())]);
 
-    while let Some((directory_path, directory_identity)) = stack.pop() {
+    while let Some((directory_path, directory_identity)) = pending.pop_front() {
         if !wait_if_paused(control) {
             stats.cancelled = true;
             break;
@@ -258,7 +258,7 @@ fn run_scan(
             child_identities.push(identity.clone());
             if kind == NodeKind::Directory && (!is_reparse || request.follow_reparse_points) {
                 stats.directories += 1;
-                stack.push((path, identity));
+                pending.push_back((path, identity));
             } else if kind == NodeKind::File {
                 stats.files += 1;
                 stats.logical_bytes = stats.logical_bytes.saturating_add(logical);
