@@ -3,8 +3,8 @@ $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $packageTarget = Join-Path $repo 'target\package-build'
 $dist = Join-Path $repo 'dist'
-$stage = Join-Path $dist 'Voidspace-0.1.0-windows-x64'
-$archive = Join-Path $dist 'Voidspace-0.1.0-windows-x64.zip'
+$stage = Join-Path $dist 'Voidspace-0.1.1-windows-x64'
+$archive = Join-Path $dist 'Voidspace-0.1.1-windows-x64.zip'
 
 function Remove-WithRetry([string]$Path, [switch]$Recurse) {
     if (-not (Test-Path -LiteralPath $Path)) { return }

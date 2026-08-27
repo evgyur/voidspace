@@ -233,6 +233,16 @@ fn angle_difference(a: f32, b: f32) -> f32 {
     (a - b + PI).rem_euclid(PI * 2.0) - PI
 }
 
+fn geometry_for_area_painter(
+    geometry: TacticalArcGeometry,
+    painter_clip: Rect,
+) -> TacticalArcGeometry {
+    debug_assert!(geometry.work_area.contains(geometry.bounds().min));
+    debug_assert!(geometry.work_area.contains(geometry.bounds().max));
+    debug_assert!(painter_clip.intersects(geometry.bounds()));
+    geometry
+}
+
 #[derive(Clone, Debug)]
 pub struct TacticalArcState {
     pub target: ContextTarget,
@@ -278,33 +288,27 @@ impl TacticalArcState {
             .fixed_pos(area_rect.min)
             .show(context, |ui| {
                 ui.set_min_size(area_rect.size());
-                let offset = area_rect.min.to_vec2();
-                let center = geometry.center - offset;
-                let local_geometry = TacticalArcGeometry {
-                    center,
-                    origin: geometry.origin - offset,
-                    work_area: geometry.work_area.translate(-offset),
-                    ..geometry
-                };
                 let (rect, response) = ui.allocate_exact_size(area_rect.size(), Sense::click());
                 let painter = ui.painter_at(rect);
+                let draw_geometry = geometry_for_area_painter(geometry, rect);
+                let center = draw_geometry.center;
                 let pointer = ui.ctx().pointer_hover_pos();
                 let hovered = pointer.and_then(|position| geometry.hit_test(position));
 
                 for (index, sector) in SECTORS.iter().enumerate() {
                     let active = hovered == Some(sector.action)
                         || (hovered.is_none() && self.keyboard_index == Some(index));
-                    let angle = local_geometry.action_angle(index);
+                    let angle = draw_geometry.action_angle(index);
                     let mut outer_points = Vec::with_capacity(13);
                     let mut inner_points = Vec::with_capacity(13);
                     for step in 0..=12 {
                         let fraction = step as f32 / 12.0;
                         let sample = angle - SECTOR_HALF_ANGLE + SECTOR_HALF_ANGLE * 2.0 * fraction;
                         outer_points.push(
-                            center + Vec2::angled(sample) * (OUTER_RADIUS * local_geometry.scale),
+                            center + Vec2::angled(sample) * (OUTER_RADIUS * draw_geometry.scale),
                         );
                         inner_points.push(
-                            center + Vec2::angled(sample) * (INNER_RADIUS * local_geometry.scale),
+                            center + Vec2::angled(sample) * (INNER_RADIUS * draw_geometry.scale),
                         );
                     }
                     let fill = if active {
@@ -337,7 +341,7 @@ impl TacticalArcState {
                     painter.add(Shape::line(inner_points.clone(), sector_stroke));
                     painter.line_segment([inner_points[0], outer_points[0]], sector_stroke);
                     painter.line_segment([inner_points[12], outer_points[12]], sector_stroke);
-                    let action_center = local_geometry.action_center(index);
+                    let action_center = draw_geometry.action_center(index);
                     painter.text(
                         action_center,
                         Align2::CENTER_CENTER,
@@ -348,7 +352,7 @@ impl TacticalArcState {
                     let action_response = ui.interact(
                         Rect::from_center_size(
                             action_center,
-                            Vec2::splat(56.0 * local_geometry.scale),
+                            Vec2::splat(56.0 * draw_geometry.scale),
                         ),
                         Id::new("tactical-action").with(index),
                         Sense::click(),
@@ -368,12 +372,12 @@ impl TacticalArcState {
 
                 painter.circle_filled(
                     center,
-                    HUB_RADIUS * local_geometry.scale,
+                    HUB_RADIUS * draw_geometry.scale,
                     Color32::from_rgb(7, 9, 10),
                 );
                 painter.circle_stroke(
                     center,
-                    HUB_RADIUS * local_geometry.scale,
+                    HUB_RADIUS * draw_geometry.scale,
                     Stroke::new(1.0, hud::ORANGE),
                 );
                 painter.text(
@@ -392,9 +396,9 @@ impl TacticalArcState {
                 );
 
                 if let Some(pointer) = pointer {
-                    painter.line_segment([center, pointer - offset], Stroke::new(1.5, hud::CYAN));
+                    painter.line_segment([center, pointer], Stroke::new(1.5, hud::CYAN));
                 }
-                let rail = local_geometry.rail_rect();
+                let rail = draw_geometry.rail_rect();
                 painter.rect_filled(rail, 0.0, hud::PANEL_RAISED);
                 painter.rect_stroke(
                     rail,
@@ -524,5 +528,74 @@ mod tests {
             assert!(!action.accessible_name().is_empty());
             assert!(!action.keyboard_hint().is_empty());
         }
+    }
+
+    #[test]
+    fn area_painter_keeps_tactical_geometry_in_global_coordinates() {
+        let work_area = Rect::from_min_max(Pos2::ZERO, Pos2::new(1280.0, 720.0));
+        let geometry = TacticalArcGeometry::fit(Pos2::new(420.0, 280.0), work_area, 1.0)
+            .expect("test work area fits tactical arc");
+        let painter_clip = geometry.bounds().expand(SAFE_MARGIN);
+
+        let draw_geometry = geometry_for_area_painter(geometry, painter_clip);
+
+        assert_eq!(draw_geometry.center, geometry.center);
+        assert!(painter_clip.contains(draw_geometry.rail_rect().min));
+        assert!(painter_clip.contains(draw_geometry.rail_rect().max));
+        for index in 0..SECTORS.len() {
+            assert!(painter_clip.contains(draw_geometry.action_center(index)));
+        }
+    }
+
+    #[test]
+    fn tactical_arc_labels_are_visible_inside_the_foreground_clip() {
+        let context = egui::Context::default();
+        let work_area = Rect::from_min_max(Pos2::ZERO, Pos2::new(1280.0, 720.0));
+        let target = ContextTarget {
+            scan_id: ScanId(1),
+            generation: 1,
+            node_id: NodeId(7),
+            identity: FileIdentity::stable(voidspace_model::VolumeId::local_for_test(1), 7, 1),
+            path: PathBuf::from(r"C:\Users\test"),
+            kind: NodeKind::Directory,
+            root: PathBuf::from(r"C:\"),
+            view_root: NodeId(1),
+            display_name: "test".to_owned(),
+            display_size: "9.7G".to_owned(),
+            origin_focus: Id::new("test-target"),
+        };
+        let mut arc = TacticalArcState::new(target, Pos2::new(1000.0, 600.0), work_area, false)
+            .expect("test work area fits tactical arc");
+        let input = egui::RawInput {
+            screen_rect: Some(work_area),
+            ..Default::default()
+        };
+        let mut first_output = context.run_ui(input.clone(), |ui| {
+            arc.show(ui.ctx(), FontId::monospace(8.0));
+        });
+        first_output.textures_delta.clear();
+        let mut output = context.run_ui(input, |ui| {
+            arc.show(ui.ctx(), FontId::monospace(8.0));
+        });
+
+        fn visible_text_shapes(shape: &Shape, clip: Rect) -> usize {
+            match shape {
+                Shape::Vec(shapes) => shapes
+                    .iter()
+                    .map(|shape| visible_text_shapes(shape, clip))
+                    .sum(),
+                Shape::Text(_) => usize::from(clip.intersects(shape.visual_bounding_rect())),
+                _ => 0,
+            }
+        }
+
+        let visible_labels = output
+            .shapes
+            .iter()
+            .map(|clipped| visible_text_shapes(&clipped.shape, clipped.clip_rect))
+            .sum::<usize>();
+
+        output.textures_delta.clear();
+        assert_eq!(visible_labels, 7);
     }
 }
