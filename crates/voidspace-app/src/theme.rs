@@ -45,6 +45,8 @@ pub enum TypographyToken {
     DataNormal,
     DataCompact,
     DataMicro,
+    StatusLabel,
+    StatusValue,
 }
 
 #[derive(Clone, Debug)]
@@ -104,6 +106,10 @@ impl Typography {
             TypographyToken::DataNormal => ("voidspace.jetbrains.500", FontFamily::Monospace, 12.0),
             TypographyToken::DataCompact => ("voidspace.jetbrains.500", FontFamily::Monospace, 9.0),
             TypographyToken::DataMicro => ("voidspace.jetbrains.500", FontFamily::Monospace, 9.0),
+            TypographyToken::StatusLabel => ("voidspace.jetbrains.500", FontFamily::Monospace, 8.0),
+            TypographyToken::StatusValue => {
+                ("voidspace.jetbrains.500", FontFamily::Monospace, 11.0)
+            }
         };
         FontId::new(
             size,
@@ -330,6 +336,17 @@ mod typography_tests {
         assert!(selected.font(TypographyToken::TileNameLarge).size <= 11.0);
         assert!(selected.font(TypographyToken::TileNameCompact).size <= 9.0);
         assert!(selected.font(TypographyToken::DataCompact).size <= 9.0);
+    }
+
+    #[test]
+    fn status_values_use_a_readable_machine_typeface() {
+        let selected = Typography::for_test(TypographySource::EmbeddedSelected, 1.0);
+        let font = selected.font(TypographyToken::StatusValue);
+        assert_eq!(
+            font.family,
+            FontFamily::Name("voidspace.jetbrains.500".into())
+        );
+        assert_eq!(font.size, 11.0);
     }
 
     #[test]

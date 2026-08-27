@@ -34,6 +34,25 @@ const VOLUME_CARD_HEIGHT: f32 = 148.0;
 const VOLUME_CARD_GAP: f32 = 16.0;
 const VOLUME_GRID_MAX_WIDTH: f32 = 1_280.0;
 
+#[derive(Clone, Copy, Debug)]
+struct StatusBarGeometry {
+    height: f32,
+    vertical_margin: i8,
+}
+
+impl StatusBarGeometry {
+    fn content_height(self) -> f32 {
+        self.height - f32::from(self.vertical_margin) * 2.0
+    }
+}
+
+fn status_bar_geometry() -> StatusBarGeometry {
+    StatusBarGeometry {
+        height: 48.0,
+        vertical_margin: 7,
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkspaceMode {
     Docked,
@@ -1437,43 +1456,64 @@ impl VoidspaceApp {
     }
 
     fn status_bar(&mut self, root_ui: &mut egui::Ui) {
+        let geometry = status_bar_geometry();
         egui::Panel::bottom("status")
-            .exact_size(30.0)
+            .exact_size(geometry.height)
             .frame(
                 egui::Frame::new()
                     .fill(theme::SURFACE)
-                    .inner_margin(egui::Margin::symmetric(10, 5)),
+                    .stroke(egui::Stroke::new(1.0, theme::LINE))
+                    .inner_margin(egui::Margin::symmetric(14, geometry.vertical_margin)),
             )
             .show(root_ui, |ui| {
+                ui.set_min_height(geometry.content_height());
                 ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 14.0;
                     if let Some(tab) = self.tabs.get(self.active_tab) {
-                        ui.label(
-                            egui::RichText::new(if tab.scanning { "SCANNING" } else { "LIVE" })
-                                .strong()
-                                .color(if tab.scanning {
-                                    theme::ORANGE
-                                } else {
-                                    theme::LIME
-                                }),
+                        status_field(
+                            ui,
+                            &self.typography,
+                            "SCAN",
+                            if tab.scanning { "SCANNING" } else { "LIVE" },
+                            if tab.scanning {
+                                theme::ORANGE
+                            } else {
+                                theme::LIME
+                            },
                         );
                         ui.separator();
-                        ui.label(format!("{} entries", tab.files_seen));
+                        status_field(
+                            ui,
+                            &self.typography,
+                            "ENTRIES",
+                            tab.files_seen.to_string(),
+                            theme::TEXT,
+                        );
                         ui.separator();
-                        ui.label(format!(
-                            "INDEXED {}",
+                        status_field(
+                            ui,
+                            &self.typography,
+                            "INDEXED",
                             treemap::format_bytes(
                                 tab.snapshot
                                     .node(tab.snapshot.root)
                                     .map_or(0, |node| node.allocated),
-                            )
-                        ));
+                            ),
+                            theme::TEXT,
+                        );
                         if let Some(usage) = tab.volume_usage {
                             ui.separator();
-                            ui.label(format!(
-                                "DISK USED {} / {}",
-                                volume::format_decimal_bytes(usage.used()),
-                                volume::format_decimal_bytes(usage.total),
-                            ));
+                            status_field(
+                                ui,
+                                &self.typography,
+                                "DISK USED",
+                                format!(
+                                    "{} / {}",
+                                    volume::format_decimal_bytes(usage.used()),
+                                    volume::format_decimal_bytes(usage.total),
+                                ),
+                                theme::TEXT,
+                            );
                         }
                         if tab
                             .watcher
@@ -1481,32 +1521,50 @@ impl VoidspaceApp {
                             .is_some_and(|watcher| watcher.health().overflowed)
                         {
                             ui.separator();
-                            ui.label(egui::RichText::new("WATCH RESYNC").color(theme::ORANGE));
+                            status_field(ui, &self.typography, "WATCH", "RESYNC", theme::ORANGE);
                         }
                     } else {
-                        ui.label(egui::RichText::new("READY").color(theme::MUTED));
+                        status_field(ui, &self.typography, "SYSTEM", "READY", theme::MUTED);
                     }
                     if let Some(error) = &self.filter_error {
                         ui.separator();
-                        ui.label(egui::RichText::new(error).color(theme::ORANGE));
+                        status_field(ui, &self.typography, "FILTER", error, theme::ORANGE);
                     }
                     if self.fileop_running {
                         ui.separator();
-                        ui.label(egui::RichText::new("FILE OPERATION").color(theme::MAGENTA));
+                        status_field(ui, &self.typography, "FILE OP", "RUNNING", theme::MAGENTA);
                     }
                     ui.separator();
-                    ui.label(
-                        egui::RichText::new("TURBO ACTIVE")
-                            .strong()
-                            .color(theme::LIME),
-                    );
+                    status_field(ui, &self.typography, "ENGINE", "TURBO ACTIVE", theme::LIME);
                     if let Some(toast) = &self.toast {
                         ui.separator();
-                        ui.label(egui::RichText::new(toast).color(theme::ORANGE));
+                        status_field(ui, &self.typography, "NOTICE", toast, theme::ORANGE);
                     }
                 });
             });
     }
+}
+
+fn status_field(
+    ui: &mut egui::Ui,
+    typography: &theme::Typography,
+    label: &str,
+    value: impl Into<String>,
+    value_color: egui::Color32,
+) {
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        ui.label(
+            egui::RichText::new(label)
+                .font(typography.font(theme::TypographyToken::StatusLabel))
+                .color(theme::MUTED),
+        );
+        ui.label(
+            egui::RichText::new(value.into())
+                .font(typography.font(theme::TypographyToken::StatusValue))
+                .color(value_color),
+        );
+    });
 }
 
 fn apply_volume_refresh(
@@ -2031,5 +2089,18 @@ mod fileop_dispatch_tests {
             delete_dispatch(OperationKind::Permanent),
             DeleteDispatch::Confirm
         );
+    }
+}
+
+#[cfg(test)]
+mod status_bar_tests {
+    use super::status_bar_geometry;
+
+    #[test]
+    fn status_bar_has_two_rows_and_vertical_breathing_room() {
+        let geometry = status_bar_geometry();
+        assert_eq!(geometry.height, 48.0);
+        assert!(geometry.vertical_margin >= 7);
+        assert!(geometry.content_height() >= 32.0);
     }
 }
