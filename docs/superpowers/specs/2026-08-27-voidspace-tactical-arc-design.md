@@ -40,10 +40,10 @@ Must not drift:
 - The clicked node becomes the current context target and selection, preserving existing behavior.
 - Aggregate `OTHER` tiles remain non-file actions and do not expose destructive actions until opened to real members.
 - Only one Tactical Arc may be open at a time.
-- `Shift+F10` or the keyboard Context Menu key opens Tactical Arc for the focused real tile; if no real tile has focus, the command does nothing.
+- `Shift+F10` opens Tactical Arc for the focused real tile; if no real tile has focus, the command does nothing. The hardware Context Menu key may be added only when the Windows backend exposes it reliably and is not an acceptance requirement.
 - While Tactical Arc is open, its full-canvas input shield consumes pointer and keyboard events before the treemap. A second right-click dismisses the current menu; it never simultaneously retargets another tile or activates underlying treemap content.
 
-The menu stores a fail-closed `ContextTarget` containing the tab identity, node identity, snapshot version, captured absolute path, node kind, and invocation-time treemap root. Before emitting any action, the application resolves the node again and requires every stored field to match. A tab switch, rescan/restart, missing or renamed node, changed path/kind, changed treemap root, or snapshot replacement dismisses the menu and shows `TARGET CHANGED · OPEN AGAIN`. No action is emitted from stale state.
+The menu stores a fail-closed `ContextTarget` containing the tab identity, scan epoch, stable node identity, captured absolute path, node kind, and invocation-time treemap root. The scan epoch changes only when a tab starts a new baseline/restart; normal live-scan snapshot revisions do not change it. Before emitting any action, the application resolves the stable node identity in the current snapshot and requires tab identity, scan epoch, path, kind, and treemap root to match. A tab switch, rescan/restart, missing or renamed node, changed path/kind, or changed treemap root dismisses the menu and shows `TARGET CHANGED · OPEN AGAIN`. Unrelated live updates do not dismiss it. No action is emitted from stale state.
 
 ### Geometry
 
@@ -68,7 +68,7 @@ The sector definition is one constant table shared by rendering, hit testing, ac
 - Near top or bottom edges, its hub is clamped so the full fan and label rail stay visible.
 - The interaction origin remains visually connected to the clamped hub when displacement is required.
 - The tether is a straight 1-point line from the original click point to the clamped hub and is painted only when displacement exceeds 2 points.
-- The minimum supported menu bounding box is 224×224 points plus the label rail. If the treemap canvas is smaller, the menu uses a 0.75 geometry scale, ellipsizes the detail rail, and centers the combined bounds. If even the minimum scaled bounds cannot fit, opening fails closed with `WINDOW TOO SMALL FOR COMMAND MENU` rather than painting outside the canvas.
+- The minimum supported fan bounding box is 232×232 points, including the 106-point outer radius and 8-point safe margins, plus the label rail. If the treemap canvas is smaller, the menu uses a 0.75 geometry scale, ellipsizes the detail rail, and centers the combined bounds. If even the minimum scaled bounds cannot fit, opening fails closed with `WINDOW TOO SMALL FOR COMMAND MENU` rather than painting outside the canvas.
 
 ### Pointer line and selection
 
@@ -106,11 +106,12 @@ Responsibilities:
 
 - `TacticalArcState`: validated `ContextTarget`, invocation origin, clamped hub, orientation, highlighted action, input mode, and origin focus identity.
 - Pure geometry functions: fan orientation, sector paths, hit testing, clamping, and keyboard selection.
-- `show`: render a foreground `egui::Area` with a full-canvas input shield and return an explicit lifecycle outcome: `Open(updated_state)`, `Dismissed(reason)`, or `Action(TreemapContextAction)`.
+- `handle_input`: runs before treemap widget registration, consumes radial pointer/keyboard input, and returns `Open(updated_state)`, `Dismissed(reason)`, or `Action(TreemapContextAction)`.
+- `paint`: renders the foreground `egui::Area`, full-canvas shield, and accessibility responses after the treemap has painted.
 
 The treemap remains responsible for detecting the right-clicked real node and returning the context target. The application owns opening/closing radial state and translating the returned action into the existing inspector/file-operation pipeline.
 
-State is invalidated before painting whenever target validation fails. The old `egui::Response::context_menu` block is removed after the new path is verified. No second context-menu implementation remains.
+When Tactical Arc was already open at frame start, `treemap::show` receives `interaction_enabled: false`: it still paints the treemap but does not register tile click, hover, focus, or context-menu responses. Radial input is therefore handled before the treemap and cannot leak through to underlying tiles. The right-click that first opens Tactical Arc is detected by the normal treemap path; the modal interaction order takes effect on the following frame. State is invalidated before painting whenever target validation fails. The old `egui::Response::context_menu` block is removed after the new path is verified. No second context-menu implementation remains.
 
 ## 5. Bottom status bar alignment
 
@@ -164,7 +165,7 @@ Focused unit tests cover:
 - Keyboard opening, focus trap/restore, and handled-input consumption.
 - Aggregate tiles cannot emit file actions.
 - Action mapping preserves Reveal / Recycle / Permanent semantics.
-- ContextTarget validation fails on tab, snapshot, path, kind, root, rename, removal, and rescan changes.
+- ContextTarget validation fails on tab, scan epoch, path, kind, root, rename, removal, and rescan changes, while unrelated live snapshot revisions preserve the menu.
 - Status-bar geometry centers the metric group vertically.
 - About links match the approved public URLs.
 
@@ -172,7 +173,7 @@ Runtime verification covers:
 
 - Right-click a real folder near the center and all four window edges.
 - Move between all sectors and verify the line follows the pointer.
-- Execute Explorer and Recycle against a unique temporary test root created for this verification. Resolve both source and target paths and prove they remain inside that root before Recycle is enabled; otherwise abort the destructive check. Confirm Recycle has no extra dialog.
+- Execute Explorer and Recycle against a unique temporary test root created for this verification. Resolve the allowed root and selected source path and prove the source remains inside that root before Recycle is enabled; otherwise abort the destructive check. Confirm Recycle has no extra dialog.
 - Enter permanent deletion and verify the existing confirmation still gates execution.
 - Dismiss with Escape, outside click, hub click, and repeated right-click.
 - Open About and verify every link is visible and clickable.
