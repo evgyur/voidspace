@@ -170,7 +170,7 @@ The inspector becomes a compact instrument column:
 - Data rows: label left, value right, one-point separators.
 - Optional live rows: watcher state and last change, only when authoritative values exist.
 - Navigation actions: `ZOOM / ENTER`, `BACK`.
-- Existing file actions Explorer and Copy Path remain available; destructive actions stay in Tactical Arc and approved dialogs, preventing duplicate dangerous controls.
+- Existing file actions Explorer and Copy Path are intentionally preserved in this slice without semantic changes; destructive actions stay in Tactical Arc and approved dialogs, preventing duplicate dangerous controls.
 
 The inspector is 250–320 points depending on workspace width. At the compact breakpoint it becomes the existing drawer; all content remains reachable by scrolling.
 
@@ -190,7 +190,7 @@ One app-owned `OverlayCoordinator` governs transient and modal UI. Components re
 Precedence from highest to lowest:
 
 1. Modal file-operation/permanent-delete dialog.
-2. One transient overlay: Tactical Arc, disk picker, About, compact filter editor, or inspector drawer.
+2. One transient overlay: Tactical Arc, disk picker, About, compact filter editor, inspector drawer, or Status Details.
 3. Passive toast/notice.
 4. Base shell and docked inspector.
 
@@ -244,7 +244,7 @@ Full Tactical HUD adds:
 - Geometry and label measurement are cached where the existing treemap cache permits.
 - The redesign must not introduce continuous idle repainting. A runtime diagnostic counter records app UI frames; after a one-second settling window with scanning complete/paused, pointer stationary, and no overlays, a five-second observation may contain at most three UI frames excluding OS expose, resize, and DPI events.
 - Release performance is compared on the same otherwise-idle machine against baseline commit `fc46ec4`. A deterministic temporary tree and the same scanner settings are scanned five times per candidate; the median indexed entries/second may regress by no more than 5%. The benchmark runs with the window visible and the 1024-tile HUD workspace active. All five completed runs are included; there is no subjective outlier removal.
-- A UI render benchmark uses a fixed 1024-tile snapshot at 1920×1080 for 600 frames. Candidate median and p95 frame time may regress by no more than 10% versus `fc46ec4`, and p95 must remain below 16.7 ms on the verification machine.
+- A UI render benchmark uses a fixed 1024-tile snapshot at 1920×1080. The harness forces repaint only for measurement, runs 60 unmeasured warm-up frames, then measures 600 frames. Candidate median and p95 frame time may regress by no more than 10% versus `fc46ec4`, and p95 must remain below 16.7 ms on the verification machine. Forced benchmark repainting is isolated from production idle-repaint assertions.
 
 ## 17. Accessibility
 
@@ -259,7 +259,8 @@ Full Tactical HUD adds:
 - `theme`: tokens and typography roles only.
 - `hud`: reusable instrument cells, cut-corner frame, state square, metric row, focus brackets, and micro-label helpers.
 - `volume_display_registry`: the sole session-local root-to-`VOL:##` mapping.
-- `overlay_coordinator`: exclusivity, precedence, focus handoff, toast safe placement/queueing, and Escape routing.
+- `overlay_coordinator`: typed transient set including `StatusDetails`, exclusivity, precedence, focus handoff, toast safe placement/queueing, and Escape routing.
+- `status_bar`: metric priority/collapse, `MORE +N`, Status Details rendering/actions, keyboard scrolling, and restoration of focus to `MORE +N` after dismissal.
 - `top_bar`: command cells and compact breakpoint behavior.
 - `tab_bar`: volume-tab presentation and overflow.
 - `breadcrumb`: path collapsing and navigation responses.
