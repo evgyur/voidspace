@@ -232,6 +232,12 @@ enum NavigationIntent {
     Jump(NodeId),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BackDestination {
+    Parent,
+    VolumePicker,
+}
+
 enum InspectorAction {
     Reveal(PathBuf),
     Recycle(PathBuf),
@@ -239,6 +245,7 @@ enum InspectorAction {
     Rescan,
     Snapshot,
     Report(ReportFormat),
+    ShowVolumePicker,
 }
 
 enum ArtifactAction {
@@ -249,6 +256,19 @@ enum ArtifactAction {
 struct FileOpDialog {
     operation: ConfirmableOperation,
     phrase: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DeleteDispatch {
+    Immediate,
+    Confirm,
+}
+
+fn delete_dispatch(kind: OperationKind) -> DeleteDispatch {
+    match kind {
+        OperationKind::Recycle => DeleteDispatch::Immediate,
+        OperationKind::Permanent => DeleteDispatch::Confirm,
+    }
 }
 
 pub struct VoidspaceApp {
@@ -274,6 +294,7 @@ pub struct VoidspaceApp {
     volume_refresh_in_flight: bool,
     volume_discovery_complete: bool,
     volume_discovery_error: Option<String>,
+    volume_picker_visible: bool,
     settings: Settings,
 }
 
@@ -308,6 +329,7 @@ impl VoidspaceApp {
             volume_refresh_in_flight: false,
             volume_discovery_complete: false,
             volume_discovery_error: None,
+            volume_picker_visible: false,
             settings,
         };
         let arguments: Vec<String> = std::env::args().collect();
@@ -343,12 +365,14 @@ impl VoidspaceApp {
             self.scope_text = self.tabs[index].root_path.display().to_string();
             self.volume_switcher.open = false;
             self.volume_switcher.issue = None;
+            self.volume_picker_visible = false;
             return;
         }
         self.scope_text = requested.display().to_string();
         if self.start_scan(requested) {
             self.volume_switcher.open = false;
             self.volume_switcher.issue = None;
+            self.volume_picker_visible = false;
         } else {
             self.volume_switcher.issue = self.toast.clone();
         }
@@ -801,6 +825,7 @@ impl VoidspaceApp {
                         }
                         if response.clicked() {
                             self.active_tab = index;
+                            self.volume_picker_visible = false;
                         }
                         if close.clicked() {
                             close_requested = Some(index);
@@ -899,14 +924,7 @@ impl VoidspaceApp {
                 {
                     treemap_action = Some(TreemapAction::Zoom(selected));
                 }
-                if ui
-                    .add_enabled(
-                        tab.treemap_state.view_path.as_slice().len() > 1
-                            || !tab.treemap_state.aggregate_views.is_empty(),
-                        egui::Button::new("BACK"),
-                    )
-                    .clicked()
-                {
+                if ui.add(egui::Button::new("BACK")).clicked() {
                     navigation = NavigationIntent::Back;
                 }
             });
@@ -1033,12 +1051,14 @@ impl VoidspaceApp {
         if let Some(treemap_action) = treemap_action {
             tab.apply_treemap_action(treemap_action);
         }
-        apply_navigation(tab, navigation);
+        if apply_navigation(tab, navigation) {
+            action = Some(InspectorAction::ShowVolumePicker);
+        }
         action
     }
 
     fn workspace(&mut self, root_ui: &mut egui::Ui) {
-        if self.tabs.is_empty() {
+        if self.tabs.is_empty() || self.volume_picker_visible {
             let mut scan_root = None;
             egui::CentralPanel::default()
                 .frame(egui::Frame::new().fill(theme::BG))
@@ -1173,13 +1193,14 @@ impl VoidspaceApp {
                 if mode == WorkspaceMode::DrawerClosed && ui.button("DETAILS").clicked() {
                     self.details_drawer = true;
                 }
+                let mut show_volume_picker = false;
                 if ui.ctx().input_mut(|input| {
                     input.consume_key(egui::Modifiers::ALT, egui::Key::ArrowLeft)
                 }) {
-                    apply_navigation(tab, NavigationIntent::Back);
+                    show_volume_picker |= apply_navigation(tab, NavigationIntent::Back);
                 }
                 let navigation = treemap_navigation(ui, tab);
-                apply_navigation(tab, navigation);
+                show_volume_picker |= apply_navigation(tab, navigation);
                 ui.separator();
                 let aggregate_view = tab.treemap_state.aggregate_views.last().cloned();
                 let view_root = aggregate_view.as_ref().map_or_else(
@@ -1267,6 +1288,9 @@ impl VoidspaceApp {
                 if let Some(action) = response.action {
                     tab.apply_treemap_action(action);
                 }
+                if show_volume_picker {
+                    inspector_action = Some(InspectorAction::ShowVolumePicker);
+                }
             });
 
         if self.details_drawer {
@@ -1303,6 +1327,10 @@ impl VoidspaceApp {
             InspectorAction::Report(format) => {
                 self.save_artifact(ArtifactAction::Report(format));
             }
+            InspectorAction::ShowVolumePicker => {
+                self.volume_picker_visible = true;
+                self.details_drawer = false;
+            }
         }
     }
 
@@ -1311,10 +1339,28 @@ impl VoidspaceApp {
             kind,
             paths: vec![path],
         }) {
+            Ok(operation) => match delete_dispatch(kind) {
+                DeleteDispatch::Immediate => self.execute_fileop(operation, ""),
+                DeleteDispatch::Confirm => {
+                    self.fileop_dialog = Some(FileOpDialog {
+                        operation,
+                        phrase: String::new(),
+                    });
+                }
+            },
+            Err(error) => self.toast = Some(error.to_string()),
+        }
+    }
+
+    fn execute_fileop(&mut self, operation: ConfirmableOperation, phrase: &str) {
+        match confirm(operation, phrase) {
             Ok(operation) => {
-                self.fileop_dialog = Some(FileOpDialog {
-                    operation,
-                    phrase: String::new(),
+                let sink = self.fileop_tx.clone();
+                self.fileop_running = true;
+                std::thread::spawn(move || {
+                    let result = execute(operation, None, &CancellationToken::default())
+                        .map_err(|error| error.to_string());
+                    let _ = sink.send(result);
                 });
             }
             Err(error) => self.toast = Some(error.to_string()),
@@ -1386,18 +1432,7 @@ impl VoidspaceApp {
             self.fileop_dialog = None;
         } else if execute_now && let Some(dialog) = self.fileop_dialog.take() {
             let phrase = if permanent { "DELETE" } else { "" };
-            match confirm(dialog.operation, phrase) {
-                Ok(operation) => {
-                    let sink = self.fileop_tx.clone();
-                    self.fileop_running = true;
-                    std::thread::spawn(move || {
-                        let result = execute(operation, None, &CancellationToken::default())
-                            .map_err(|error| error.to_string());
-                        let _ = sink.send(result);
-                    });
-                }
-                Err(error) => self.toast = Some(error.to_string()),
-            }
+            self.execute_fileop(dialog.operation, phrase);
         }
     }
 
@@ -1491,14 +1526,7 @@ fn apply_volume_refresh(
 fn treemap_navigation(ui: &mut egui::Ui, tab: &ScanTab) -> NavigationIntent {
     let mut intent = NavigationIntent::None;
     ui.horizontal(|ui| {
-        if ui
-            .add_enabled(
-                tab.treemap_state.view_path.as_slice().len() > 1
-                    || !tab.treemap_state.aggregate_views.is_empty(),
-                egui::Button::new("← BACK"),
-            )
-            .clicked()
-        {
+        if ui.add(egui::Button::new("← BACK")).clicked() {
             intent = NavigationIntent::Back;
         }
         for (index, node_id) in tab
@@ -1535,7 +1563,23 @@ fn treemap_navigation(ui: &mut egui::Ui, tab: &ScanTab) -> NavigationIntent {
     intent
 }
 
-fn apply_navigation(tab: &mut ScanTab, intent: NavigationIntent) {
+fn back_destination(view_path_len: usize, aggregate_views_len: usize) -> BackDestination {
+    if view_path_len > 1 || aggregate_views_len > 0 {
+        BackDestination::Parent
+    } else {
+        BackDestination::VolumePicker
+    }
+}
+
+fn apply_navigation(tab: &mut ScanTab, intent: NavigationIntent) -> bool {
+    if intent == NavigationIntent::Back
+        && back_destination(
+            tab.treemap_state.view_path.as_slice().len(),
+            tab.treemap_state.aggregate_views.len(),
+        ) == BackDestination::VolumePicker
+    {
+        return true;
+    }
     let target = match intent {
         NavigationIntent::None => None,
         NavigationIntent::Back => tab.treemap_state.back(),
@@ -1546,6 +1590,7 @@ fn apply_navigation(tab: &mut ScanTab, intent: NavigationIntent) {
         tab.treemap_state.pinned = None;
         tab.treemap_state.aggregate = None;
     }
+    false
 }
 
 fn volume_grid_columns(available_width: f32) -> usize {
@@ -1948,5 +1993,43 @@ mod tab_close_tests {
     #[test]
     fn closing_the_last_tab_returns_to_the_volume_picker() {
         assert_eq!(active_index_after_close(1, 0, 0), None);
+    }
+}
+
+#[cfg(test)]
+mod back_navigation_tests {
+    use super::{BackDestination, back_destination};
+
+    #[test]
+    fn back_from_the_scan_root_opens_the_volume_picker() {
+        assert_eq!(back_destination(1, 0), BackDestination::VolumePicker);
+    }
+
+    #[test]
+    fn back_inside_the_treemap_returns_to_the_parent() {
+        assert_eq!(back_destination(2, 0), BackDestination::Parent);
+        assert_eq!(back_destination(1, 1), BackDestination::Parent);
+    }
+}
+
+#[cfg(test)]
+mod fileop_dispatch_tests {
+    use super::{DeleteDispatch, delete_dispatch};
+    use voidspace_fileops::OperationKind;
+
+    #[test]
+    fn recycle_executes_immediately_without_a_confirmation_dialog() {
+        assert_eq!(
+            delete_dispatch(OperationKind::Recycle),
+            DeleteDispatch::Immediate
+        );
+    }
+
+    #[test]
+    fn permanent_delete_still_requires_confirmation() {
+        assert_eq!(
+            delete_dispatch(OperationKind::Permanent),
+            DeleteDispatch::Confirm
+        );
     }
 }

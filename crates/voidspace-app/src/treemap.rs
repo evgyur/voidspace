@@ -71,6 +71,24 @@ struct LabelMeasurements {
     size_height: f32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct LabelStack {
+    size_pos: Pos2,
+    name_rect: Rect,
+}
+
+fn label_stack(inner_rect: Rect, size: egui::Vec2) -> LabelStack {
+    let size_pos = inner_rect.left_top();
+    let name_top = (size_pos.y + size.y + 2.0).min(inner_rect.bottom());
+    LabelStack {
+        size_pos,
+        name_rect: Rect::from_min_max(
+            egui::pos2(inner_rect.left(), name_top),
+            inner_rect.right_bottom(),
+        ),
+    }
+}
+
 fn choose_label_tier(size: [f32; 2], metrics: LabelMeasurements) -> Option<LabelTier> {
     if size[0] >= metrics.large_width && size[1] >= metrics.large_height {
         Some(LabelTier::Large)
@@ -273,7 +291,7 @@ fn build_label_plan(
             rect.max - egui::vec2(6.0, 5.0),
         );
         let name_color = if matches_filter {
-            theme::TEXT
+            theme::TILE_MUTED
         } else {
             theme::MUTED
         };
@@ -284,20 +302,20 @@ fn build_label_plan(
                 } else {
                     compact_font
                 };
-                let (name, galley) = ellipsized_galley(
-                    ui.painter(),
-                    &raw_name,
+                let stack = label_stack(inner_rect, size_galley.size());
+                let galley = ui.painter().layout(
+                    raw_name.clone(),
                     font.clone(),
                     name_color,
-                    inner_rect.width(),
+                    stack.name_rect.width(),
                 );
-                let name_pos = inner_rect.left_top();
-                let size_pos = egui::pos2(
-                    inner_rect.left(),
-                    (name_pos.y + galley.size().y + 3.0)
-                        .min(inner_rect.bottom() - size_galley.size().y),
-                );
-                (Some(name), Some(font), Some(galley), name_pos, size_pos)
+                (
+                    Some(raw_name),
+                    Some(font),
+                    Some(galley),
+                    stack.name_rect.left_top(),
+                    stack.size_pos,
+                )
             }
             LabelTier::SizeOnly => (
                 None,
@@ -339,39 +357,6 @@ fn build_label_plan(
         ),
         tiles,
     }
-}
-
-fn ellipsized_galley(
-    painter: &egui::Painter,
-    text: &str,
-    font: FontId,
-    color: Color32,
-    max_width: f32,
-) -> (String, Arc<Galley>) {
-    let full = painter.layout_no_wrap(text.to_owned(), font.clone(), color);
-    if full.size().x <= max_width {
-        return (text.to_owned(), full);
-    }
-    let characters = text.chars().collect::<Vec<_>>();
-    let mut low = 0;
-    let mut high = characters.len();
-    let mut best = "…".to_owned();
-    let mut best_galley = painter.layout_no_wrap(best.clone(), font.clone(), color);
-    while low <= high {
-        let middle = low + (high - low) / 2;
-        let candidate = format!("{}…", characters[..middle].iter().collect::<String>());
-        let galley = painter.layout_no_wrap(candidate.clone(), font.clone(), color);
-        if galley.size().x <= max_width {
-            best = candidate;
-            best_galley = galley;
-            low = middle.saturating_add(1);
-        } else if middle == 0 {
-            break;
-        } else {
-            high = middle - 1;
-        }
-    }
-    (best, best_galley)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1128,10 +1113,14 @@ fn paint_tile(
         LabelTier::Large | LabelTier::Compact => {
             debug_assert!(label.final_name.is_some());
             debug_assert!(label.name_font.is_some());
+            painter.galley(label.size_pos, label.size_galley.clone(), theme::TEXT);
             if let Some(name) = &label.name_galley {
-                painter.galley(label.name_pos, name.clone(), label.name_color);
+                painter.with_clip_rect(label.inner_rect).galley(
+                    label.name_pos,
+                    name.clone(),
+                    label.name_color,
+                );
             }
-            painter.galley(label.size_pos, label.size_galley.clone(), theme::TILE_MUTED);
         }
         LabelTier::SizeOnly => {
             debug_assert!(label.final_name.is_none());
@@ -1365,6 +1354,18 @@ mod label_tests {
             Some(LabelTier::SizeOnly)
         );
         assert_eq!(choose_label_tier([30.0, 12.0], metrics), None);
+    }
+
+    #[test]
+    fn label_stack_places_size_before_the_wrapped_name() {
+        let inner = Rect::from_min_max(egui::pos2(10.0, 20.0), egui::pos2(130.0, 90.0));
+        let stack = label_stack(inner, egui::vec2(42.0, 11.0));
+
+        assert_eq!(stack.size_pos, inner.left_top());
+        assert!(stack.name_rect.top() > stack.size_pos.y);
+        assert_eq!(stack.name_rect.left(), inner.left());
+        assert_eq!(stack.name_rect.right(), inner.right());
+        assert_eq!(stack.name_rect.bottom(), inner.bottom());
     }
 
     #[test]

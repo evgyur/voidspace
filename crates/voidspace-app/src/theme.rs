@@ -96,15 +96,13 @@ impl Typography {
             TypographyToken::UiBody => ("voidspace.golos.400", FontFamily::Proportional, 13.0),
             TypographyToken::UiControl => ("voidspace.golos.500", FontFamily::Proportional, 13.0),
             TypographyToken::TileNameLarge => {
-                ("voidspace.golos.500", FontFamily::Proportional, 15.0)
+                ("voidspace.golos.500", FontFamily::Proportional, 11.0)
             }
             TypographyToken::TileNameCompact => {
-                ("voidspace.golos.500", FontFamily::Proportional, 12.0)
+                ("voidspace.golos.500", FontFamily::Proportional, 9.0)
             }
             TypographyToken::DataNormal => ("voidspace.jetbrains.500", FontFamily::Monospace, 12.0),
-            TypographyToken::DataCompact => {
-                ("voidspace.jetbrains.500", FontFamily::Monospace, 10.0)
-            }
+            TypographyToken::DataCompact => ("voidspace.jetbrains.500", FontFamily::Monospace, 9.0),
             TypographyToken::DataMicro => ("voidspace.jetbrains.500", FontFamily::Monospace, 9.0),
         };
         FontId::new(
@@ -324,6 +322,14 @@ mod typography_tests {
             selected.font(TypographyToken::DataCompact).family,
             FontFamily::Name("voidspace.jetbrains.500".into())
         );
+    }
+
+    #[test]
+    fn treemap_labels_use_the_compact_data_density() {
+        let selected = Typography::for_test(TypographySource::EmbeddedSelected, 1.0);
+        assert!(selected.font(TypographyToken::TileNameLarge).size <= 11.0);
+        assert!(selected.font(TypographyToken::TileNameCompact).size <= 9.0);
+        assert!(selected.font(TypographyToken::DataCompact).size <= 9.0);
     }
 
     #[test]
