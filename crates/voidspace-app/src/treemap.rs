@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use egui::{Align2, Color32, FontId, Galley, Pos2, Rect, Sense, Stroke, StrokeKind, Ui};
 use voidspace_filter::{Expr, FilterContext, matches};
@@ -171,7 +174,7 @@ pub(crate) fn candidate_metrics(
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct TileIdentity {
     node_id: NodeId,
-    render_depth: u8,
+    render_depth: usize,
     aggregated: bool,
 }
 
@@ -201,7 +204,7 @@ fn build_label_plan(
     snapshot: &IndexSnapshot,
     layout: &LayoutSnapshot,
     clip: Rect,
-    render_depth: u8,
+    render_depth: usize,
     metrics: &CandidateMetrics,
     typography: &theme::Typography,
     filter: Option<&Expr>,
@@ -387,7 +390,7 @@ enum HitKind {
     },
     Aggregate {
         parent: NodeId,
-        depth: u8,
+        depth: usize,
         members: Vec<NodeId>,
     },
 }
@@ -420,7 +423,7 @@ impl ActionHit {
         }
     }
 
-    fn aggregate(parent: NodeId, depth: u8, members: Vec<NodeId>) -> Self {
+    fn aggregate(parent: NodeId, depth: usize, members: Vec<NodeId>) -> Self {
         Self {
             node_id: parent,
             kind: HitKind::Aggregate {
@@ -453,6 +456,7 @@ fn action_for_hit(hit: &ActionHit, activation: Activation) -> TreemapAction {
         {
             TreemapAction::Zoom(hit.node_id)
         }
+        HitKind::Nested { expandable: true } => TreemapAction::ActivateBaseDirectory(hit.node_id),
         HitKind::BaseDirectory => TreemapAction::ActivateBaseDirectory(hit.node_id),
         HitKind::BaseLeaf => TreemapAction::ActivateBaseLeaf(hit.node_id),
         HitKind::Nested { .. } => TreemapAction::ActivateNested(hit.node_id),
@@ -487,7 +491,7 @@ pub struct TreemapResponse {
 struct VisibleHit {
     node_id: NodeId,
     rect: Rect,
-    depth: u8,
+    depth: usize,
     aggregated: bool,
     expandable: bool,
     name: String,
@@ -512,7 +516,7 @@ impl VisibleHit {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct RenderedAggregate {
     parent: NodeId,
-    depth: u8,
+    depth: usize,
     members: Vec<NodeId>,
 }
 
@@ -527,6 +531,32 @@ fn aggregate_is_still_valid(
                 && rendered.members == open.members
         })
     })
+}
+
+pub(crate) fn preview_chain(
+    root: NodeId,
+    target: NodeId,
+    mut parent_of: impl FnMut(NodeId) -> Option<NodeId>,
+) -> Option<Vec<NodeId>> {
+    if target == root {
+        return None;
+    }
+    let mut reverse = vec![target];
+    let mut current = target;
+    while current != root {
+        current = parent_of(current)?;
+        if reverse.contains(&current) {
+            return None;
+        }
+        reverse.push(current);
+    }
+    reverse.reverse();
+    reverse.remove(0);
+    Some(reverse)
+}
+
+fn nested_layer_accepts_click(parent_chain_index: Option<usize>) -> bool {
+    parent_chain_index.is_some()
 }
 
 pub(crate) struct ShowRequest<'a> {
@@ -582,7 +612,7 @@ pub fn show(ui: &mut Ui, request: ShowRequest<'_>) -> TreemapResponse {
         [bounds.width(), bounds.height()],
     ));
     paint_layout_overflow(&painter, base_layout, bounds, typography);
-    let hovered_preview = pointer.and_then(|position| {
+    let hovered_base = pointer.and_then(|position| {
         base_nodes
             .iter()
             .rev()
@@ -594,20 +624,24 @@ pub fn show(ui: &mut Ui, request: ShowRequest<'_>) -> TreemapResponse {
             })
             .map(|node| node.node_id)
     });
-    let pinned_visible = preview.pinned.filter(|pinned| {
-        base_nodes
-            .iter()
-            .any(|node| node.node_id == *pinned && can_preview(snapshot, node))
-    });
-    let active_preview = PreviewState {
-        pinned: pinned_visible,
-    }
-    .active(hovered_preview)
-    .or_else(|| {
-        open_aggregate
-            .filter(|aggregate| aggregate.depth == 2)
-            .map(|aggregate| aggregate.parent)
-    });
+    let persistent_target = preview
+        .pinned
+        .or_else(|| open_aggregate.map(|aggregate| aggregate.parent));
+    let persistent_chain = persistent_target
+        .and_then(|target| {
+            preview_chain(base_layout.root, target, |id| {
+                snapshot.node(id).and_then(|node| node.parent)
+            })
+        })
+        .filter(|chain| {
+            chain.first().is_some_and(|first| {
+                base_nodes
+                    .iter()
+                    .any(|node| node.node_id == *first && can_preview(snapshot, node))
+            })
+        })
+        .unwrap_or_default();
+    let active_base = hovered_base.or_else(|| persistent_chain.first().copied());
 
     let mut rendered_aggregates = base_layout
         .aggregates
@@ -633,8 +667,8 @@ pub fn show(ui: &mut Ui, request: ShowRequest<'_>) -> TreemapResponse {
             rank,
             selected,
             filter,
-            active_preview == Some(node.node_id),
-            pinned_visible == Some(node.node_id),
+            active_base == Some(node.node_id),
+            preview.pinned == Some(node.node_id),
             base_plan
                 .tiles
                 .get(&TileIdentity {
@@ -668,14 +702,26 @@ pub fn show(ui: &mut Ui, request: ShowRequest<'_>) -> TreemapResponse {
     }
 
     let mut nested_hits = Vec::new();
-    if let Some(preview_root) = active_preview
-        && let Some(parent) = base_nodes
+    let mut active_parent = active_base.and_then(|id| {
+        base_hits
             .iter()
-            .copied()
-            .find(|node| node.node_id == preview_root && can_preview(snapshot, node))
-    {
-        let parent_rect = visual_rect(parent.rect, bounds);
-        if pinned_visible == Some(preview_root) {
+            .find(|hit| hit.node_id == id && hit.expandable)
+            .cloned()
+    });
+    let mut persistent_index = active_parent.as_ref().and_then(|parent| {
+        persistent_chain
+            .first()
+            .is_some_and(|id| *id == parent.node_id)
+            .then_some(0)
+    });
+    let mut render_depth = 2_usize;
+    let mut expanded = HashSet::new();
+    while let Some(parent) = active_parent.take() {
+        if !expanded.insert(parent.node_id) {
+            break;
+        }
+        let parent_rect = parent.rect;
+        if preview.pinned == Some(parent.node_id) {
             painter.text(
                 parent_rect.right_top() + egui::vec2(-8.0, 8.0),
                 Align2::RIGHT_TOP,
@@ -695,11 +741,11 @@ pub fn show(ui: &mut Ui, request: ShowRequest<'_>) -> TreemapResponse {
             ),
         );
         if content.width() >= 80.0 && content.height() >= 48.0 {
-            let nested_metrics = candidate_metrics(ui, snapshot, preview_root, 512, typography);
+            let nested_metrics = candidate_metrics(ui, snapshot, parent.node_id, 512, typography);
             let nested_layout = layout(
                 snapshot,
                 &ViewState {
-                    root: preview_root,
+                    root: parent.node_id,
                     bounds: LayoutRect::new(
                         content.left(),
                         content.top(),
@@ -719,7 +765,7 @@ pub fn show(ui: &mut Ui, request: ShowRequest<'_>) -> TreemapResponse {
                 snapshot,
                 &nested_layout,
                 content,
-                2,
+                render_depth,
                 &nested_metrics,
                 typography,
                 filter,
@@ -738,10 +784,59 @@ pub fn show(ui: &mut Ui, request: ShowRequest<'_>) -> TreemapResponse {
                     .filter(|group| group.depth == 1)
                     .map(|group| RenderedAggregate {
                         parent: group.parent_id,
-                        depth: 2,
+                        depth: render_depth,
                         members: group.member_ids.clone(),
                     }),
             );
+            let layer_hits = nested_layout
+                .nodes
+                .iter()
+                .filter(|node| node.depth == 1)
+                .filter_map(|node| {
+                    let rect = visual_rect(node.rect, content);
+                    if rect.width() < 1.0 || rect.height() < 1.0 {
+                        return None;
+                    }
+                    let label = nested_plan
+                        .tiles
+                        .get(&TileIdentity {
+                            node_id: node.node_id,
+                            render_depth,
+                            aggregated: node.aggregated,
+                        })
+                        .expect("nested hit has no label plan");
+                    Some(VisibleHit {
+                        node_id: node.node_id,
+                        rect,
+                        depth: render_depth,
+                        aggregated: node.aggregated,
+                        expandable: !node.aggregated
+                            && snapshot
+                                .node(node.node_id)
+                                .is_some_and(|entry| !entry.children.is_empty()),
+                        name: tile_accessible_name(snapshot, node),
+                        formatted_size: label.formatted_size.clone(),
+                        aggregate_members: aggregate_members(&nested_layout, node.node_id),
+                    })
+                })
+                .collect::<Vec<_>>();
+            let hovered_child = pointer.and_then(|position| {
+                layer_hits
+                    .iter()
+                    .rev()
+                    .find(|hit| {
+                        hit.expandable
+                            && hit.rect.width() >= 80.0
+                            && hit.rect.height() >= 48.0
+                            && hit.rect.contains(position)
+                    })
+                    .map(|hit| hit.node_id)
+            });
+            let persistent_child = persistent_index
+                .and_then(|index| persistent_chain.get(index + 1))
+                .copied();
+            let next_active = hovered_child.or(persistent_child);
+
             for (rank, node) in nested_layout
                 .nodes
                 .iter()
@@ -757,42 +852,38 @@ pub fn show(ui: &mut Ui, request: ShowRequest<'_>) -> TreemapResponse {
                     snapshot,
                     node,
                     rect,
-                    rank + 1,
+                    rank + render_depth,
                     selected,
                     filter,
-                    false,
-                    false,
+                    next_active == Some(node.node_id),
+                    preview.pinned == Some(node.node_id),
                     nested_plan
                         .tiles
                         .get(&TileIdentity {
                             node_id: node.node_id,
-                            render_depth: 2,
+                            render_depth,
                             aggregated: node.aggregated,
                         })
                         .expect("nested layout emitted a tile without a measured label"),
                 );
-                let label = nested_plan
-                    .tiles
-                    .get(&TileIdentity {
-                        node_id: node.node_id,
-                        render_depth: 2,
-                        aggregated: node.aggregated,
-                    })
-                    .expect("nested hit has no label plan");
-                nested_hits.push(VisibleHit {
-                    node_id: node.node_id,
-                    rect,
-                    depth: 2,
-                    aggregated: node.aggregated,
-                    expandable: !node.aggregated
-                        && snapshot
-                            .node(node.node_id)
-                            .is_some_and(|entry| !entry.children.is_empty()),
-                    name: tile_accessible_name(snapshot, node),
-                    formatted_size: label.formatted_size.clone(),
-                    aggregate_members: aggregate_members(&nested_layout, node.node_id),
-                });
             }
+
+            let next_persistent_index = persistent_index.and_then(|index| {
+                persistent_child
+                    .is_some_and(|child| Some(child) == next_active)
+                    .then_some(index + 1)
+            });
+            if nested_layer_accepts_click(persistent_index) {
+                nested_hits.extend(layer_hits.iter().cloned());
+            }
+            active_parent = next_active.and_then(|id| {
+                layer_hits
+                    .iter()
+                    .find(|hit| hit.node_id == id && hit.expandable)
+                    .cloned()
+            });
+            persistent_index = next_persistent_index;
+            render_depth = render_depth.saturating_add(1);
         }
     }
 
@@ -863,7 +954,7 @@ fn hit_responses(
             let hint = if hit.aggregated {
                 "Click: inspect grouped items"
             } else if hit.expandable {
-                "Click: inspect · Double-click: zoom"
+                "Click: expand · Double-click: zoom"
             } else {
                 "Click: inspect"
             };
@@ -1087,6 +1178,10 @@ mod interaction_tests {
 
         let expandable_nested = ActionHit::nested(NodeId(11), true);
         assert_eq!(
+            action_for_hit(&expandable_nested, Activation::Single),
+            crate::TreemapAction::ActivateBaseDirectory(NodeId(11))
+        );
+        assert_eq!(
             action_for_hit(&expandable_nested, Activation::KeyboardZoom),
             crate::TreemapAction::Zoom(NodeId(11))
         );
@@ -1096,6 +1191,29 @@ mod interaction_tests {
             action_for_hit(&other, Activation::Double),
             crate::TreemapAction::OpenAggregate(_)
         ));
+    }
+
+    #[test]
+    fn pinned_preview_chain_reaches_any_descendant_depth() {
+        let root = NodeId(1);
+        let level_one = NodeId(2);
+        let level_two = NodeId(3);
+        let level_three = NodeId(4);
+        let chain = preview_chain(root, level_three, |id| match id {
+            NodeId(2) => Some(root),
+            NodeId(3) => Some(level_one),
+            NodeId(4) => Some(level_two),
+            _ => None,
+        });
+
+        assert_eq!(chain, Some(vec![level_one, level_two, level_three]));
+    }
+
+    #[test]
+    fn hover_only_children_do_not_steal_the_parent_click() {
+        assert!(!nested_layer_accepts_click(None));
+        assert!(nested_layer_accepts_click(Some(0)));
+        assert!(nested_layer_accepts_click(Some(7)));
     }
 
     #[test]

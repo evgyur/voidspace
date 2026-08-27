@@ -808,7 +808,7 @@ impl VoidspaceApp {
             }
             ui.add_space(10.0);
             ui.label(
-                egui::RichText::new("Hover a tile to reveal children · click to pin")
+                egui::RichText::new("Click a folder to keep drilling · double-click to zoom")
                     .size(11.0)
                     .color(theme::MUTED),
             );
@@ -1025,17 +1025,14 @@ impl VoidspaceApp {
                     &DirtySet::default(),
                 );
                 let pin_is_eligible = tab.treemap_state.pinned.is_some_and(|pinned| {
-                    tab.layout.nodes.iter().any(|node| {
-                        node.depth == 1
-                            && !node.aggregated
-                            && node.node_id == pinned
-                            && node.rect.width() >= 150.0
-                            && node.rect.height() >= 100.0
-                            && tab
-                                .snapshot
-                                .node(pinned)
-                                .is_some_and(|entry| !entry.children.is_empty())
+                    treemap::preview_chain(view_root, pinned, |id| {
+                        tab.snapshot.node(id).and_then(|node| node.parent)
                     })
+                    .is_some()
+                        && tab
+                            .snapshot
+                            .node(pinned)
+                            .is_some_and(|entry| !entry.children.is_empty())
                 });
                 if tab.treemap_state.pinned.is_some() && !pin_is_eligible {
                     tab.treemap_state.pinned = None;

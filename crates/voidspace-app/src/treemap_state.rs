@@ -3,7 +3,7 @@ use voidspace_model::NodeId;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AggregateSelection {
     pub parent: NodeId,
-    pub depth: u8,
+    pub depth: usize,
     pub members: Vec<NodeId>,
 }
 
