@@ -295,28 +295,48 @@ impl TacticalArcState {
                     let active = hovered == Some(sector.action)
                         || (hovered.is_none() && self.keyboard_index == Some(index));
                     let angle = local_geometry.action_angle(index);
-                    let mut points = vec![center];
+                    let mut outer_points = Vec::with_capacity(13);
+                    let mut inner_points = Vec::with_capacity(13);
                     for step in 0..=12 {
                         let fraction = step as f32 / 12.0;
                         let sample = angle - SECTOR_HALF_ANGLE + SECTOR_HALF_ANGLE * 2.0 * fraction;
-                        points.push(
+                        outer_points.push(
                             center + Vec2::angled(sample) * (OUTER_RADIUS * local_geometry.scale),
                         );
+                        inner_points.push(
+                            center + Vec2::angled(sample) * (INNER_RADIUS * local_geometry.scale),
+                        );
                     }
-                    painter.add(Shape::convex_polygon(
-                        points,
-                        if active {
-                            Color32::from_rgba_unmultiplied(
-                                sector.color.r(),
-                                sector.color.g(),
-                                sector.color.b(),
-                                44,
-                            )
-                        } else {
-                            Color32::from_rgba_unmultiplied(11, 14, 16, 245)
-                        },
-                        Stroke::new(if active { 2.0 } else { 1.0 }, sector.color),
-                    ));
+                    let fill = if active {
+                        Color32::from_rgba_unmultiplied(
+                            sector.color.r(),
+                            sector.color.g(),
+                            sector.color.b(),
+                            44,
+                        )
+                    } else {
+                        Color32::from_rgba_unmultiplied(11, 14, 16, 245)
+                    };
+                    let mut mesh = egui::Mesh::default();
+                    for step in 0..12 {
+                        let base = mesh.vertices.len() as u32;
+                        for point in [
+                            inner_points[step],
+                            outer_points[step],
+                            outer_points[step + 1],
+                            inner_points[step + 1],
+                        ] {
+                            mesh.colored_vertex(point, fill);
+                        }
+                        mesh.add_triangle(base, base + 1, base + 2);
+                        mesh.add_triangle(base, base + 2, base + 3);
+                    }
+                    painter.add(Shape::mesh(mesh));
+                    let sector_stroke = Stroke::new(if active { 2.0 } else { 1.0 }, sector.color);
+                    painter.add(Shape::line(outer_points.clone(), sector_stroke));
+                    painter.add(Shape::line(inner_points.clone(), sector_stroke));
+                    painter.line_segment([inner_points[0], outer_points[0]], sector_stroke);
+                    painter.line_segment([inner_points[12], outer_points[12]], sector_stroke);
                     let action_center = local_geometry.action_center(index);
                     painter.text(
                         action_center,

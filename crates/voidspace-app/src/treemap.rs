@@ -3,7 +3,7 @@ use std::{
     sync::Arc,
 };
 
-use egui::{Align2, Color32, FontId, Galley, Pos2, Rect, Sense, Stroke, Ui};
+use egui::{Align2, Color32, FontId, Galley, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 use voidspace_filter::{Expr, FilterContext, matches};
 use voidspace_index::IndexSnapshot;
 use voidspace_layout::{
@@ -673,6 +673,12 @@ pub fn show(ui: &mut Ui, request: ShowRequest<'_>) -> TreemapResponse {
         if rect.width() < 1.0 || rect.height() < 1.0 {
             continue;
         }
+        let keyboard_focused = ui.memory(|memory| {
+            memory.has_focus(
+                ui.id()
+                    .with((base_layout.root, node.node_id, 1, node.aggregated)),
+            )
+        });
         paint_tile(
             &painter,
             snapshot,
@@ -683,7 +689,7 @@ pub fn show(ui: &mut Ui, request: ShowRequest<'_>) -> TreemapResponse {
             filter,
             active_base == Some(node.node_id),
             preview.pinned == Some(node.node_id),
-            hovered_base == Some(node.node_id),
+            hovered_base == Some(node.node_id) || keyboard_focused,
             base_plan
                 .tiles
                 .get(&TileIdentity {
@@ -862,6 +868,14 @@ pub fn show(ui: &mut Ui, request: ShowRequest<'_>) -> TreemapResponse {
                 if rect.width() < 1.0 || rect.height() < 1.0 {
                     continue;
                 }
+                let keyboard_focused = ui.memory(|memory| {
+                    memory.has_focus(ui.id().with((
+                        base_layout.root,
+                        node.node_id,
+                        render_depth,
+                        node.aggregated,
+                    )))
+                });
                 paint_tile(
                     &painter,
                     snapshot,
@@ -872,7 +886,7 @@ pub fn show(ui: &mut Ui, request: ShowRequest<'_>) -> TreemapResponse {
                     filter,
                     next_active == Some(node.node_id),
                     preview.pinned == Some(node.node_id),
-                    hovered_child == Some(node.node_id),
+                    hovered_child == Some(node.node_id) || keyboard_focused,
                     nested_plan
                         .tiles
                         .get(&TileIdentity {
@@ -1097,9 +1111,35 @@ fn paint_tile(
     }
     if selected == Some(node.node_id) {
         hud::paint_corner_brackets(painter, rect.shrink(3.0), theme::ORANGE);
+        if rect.width() >= 118.0 && rect.height() >= 54.0 {
+            painter.text(
+                rect.right_top() + Vec2::new(-8.0, 8.0),
+                Align2::RIGHT_TOP,
+                "OBJECT LOCKED",
+                FontId::monospace(8.0),
+                theme::ORANGE,
+            );
+        }
     }
     if hovered && rect.width() >= 64.0 && rect.height() >= 64.0 {
         hud::paint_reticle(painter, rect.center(), hud::CYAN);
+    }
+    if !node.aggregated
+        && rect.width() >= 160.0
+        && rect.height() >= 92.0
+        && let Some(index_node) = index_node
+    {
+        painter.text(
+            rect.left_bottom() + Vec2::new(8.0, -7.0),
+            Align2::LEFT_BOTTOM,
+            format!(
+                "ID:{:04} · CHILDREN:{}",
+                node.node_id.0 % 10_000,
+                index_node.children.len()
+            ),
+            FontId::monospace(8.0),
+            theme::TILE_MUTED,
+        );
     }
 
     debug_assert_eq!(label.identity.node_id, node.node_id);

@@ -71,6 +71,10 @@ impl OverlayCoordinator {
         self.modal.is_some() || self.transient.is_some()
     }
 
+    pub fn allows_passive_toast(&self) -> bool {
+        !self.owns_pointer()
+    }
+
     pub fn route_escape(&mut self, context: &egui::Context) -> bool {
         if !context.input(|input| input.key_pressed(egui::Key::Escape)) {
             return false;
@@ -107,5 +111,15 @@ mod tests {
         overlays.open_transient(TransientOverlay::About, None);
         assert!(overlays.take_transient_just_opened());
         assert!(!overlays.take_transient_just_opened());
+    }
+
+    #[test]
+    fn passive_toast_waits_until_blocking_layers_close() {
+        let mut overlays = OverlayCoordinator::default();
+        assert!(overlays.allows_passive_toast());
+        overlays.open_transient(TransientOverlay::About, None);
+        assert!(!overlays.allows_passive_toast());
+        overlays.dismiss_transient();
+        assert!(overlays.allows_passive_toast());
     }
 }

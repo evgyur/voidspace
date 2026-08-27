@@ -1,7 +1,9 @@
 use std::{
+    collections::VecDeque,
     fs::{self, OpenOptions},
     io::Write,
     path::PathBuf,
+    time::{Duration, Instant},
 };
 
 const MAX_LOG_BYTES: u64 = 1024 * 1024;
@@ -39,4 +41,53 @@ pub fn diagnostics_path() -> PathBuf {
         .unwrap_or_else(std::env::temp_dir)
         .join("Voidspace")
         .join("diagnostics.log")
+}
+
+#[derive(Default)]
+pub struct UiFrameDiagnostic {
+    idle_since: Option<Instant>,
+    settled_frames: VecDeque<Instant>,
+}
+
+impl UiFrameDiagnostic {
+    pub fn record(&mut self, now: Instant, idle: bool) -> Option<usize> {
+        if !idle {
+            self.idle_since = None;
+            self.settled_frames.clear();
+            return None;
+        }
+        let idle_since = *self.idle_since.get_or_insert(now);
+        if now.duration_since(idle_since) < Duration::from_secs(1) {
+            return None;
+        }
+        self.settled_frames.push_back(now);
+        while self
+            .settled_frames
+            .front()
+            .is_some_and(|frame| now.duration_since(*frame) > Duration::from_secs(5))
+        {
+            self.settled_frames.pop_front();
+        }
+        (now.duration_since(idle_since) >= Duration::from_secs(6))
+            .then_some(self.settled_frames.len())
+    }
+}
+
+#[cfg(test)]
+mod frame_tests {
+    use super::*;
+
+    #[test]
+    fn idle_counter_excludes_settling_window_and_resets_on_activity() {
+        let start = Instant::now();
+        let mut counter = UiFrameDiagnostic::default();
+        assert_eq!(counter.record(start, true), None);
+        assert_eq!(counter.record(start + Duration::from_secs(1), true), None);
+        assert_eq!(
+            counter.record(start + Duration::from_secs(6), true),
+            Some(2)
+        );
+        assert_eq!(counter.record(start + Duration::from_secs(7), false), None);
+        assert_eq!(counter.record(start + Duration::from_secs(14), true), None);
+    }
 }

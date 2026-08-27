@@ -45,6 +45,7 @@ fn main() -> anyhow::Result<()> {
         descriptor.name,
     );
     let (sender, receiver) = bounded(65_536);
+    let scan_started = Instant::now();
     let handle = start(ScanRequest::new(1, 1, root.clone()), sender)?;
     loop {
         let event = receiver.recv().context("scanner disconnected")?;
@@ -55,6 +56,7 @@ fn main() -> anyhow::Result<()> {
         }
     }
     let stats = handle.join()?;
+    let elapsed_seconds = scan_started.elapsed().as_secs_f64().max(f64::EPSILON);
     let snapshot = index.snapshot();
     save_snapshot(&output.join("scan.voidspace"), &snapshot)?;
     for (name, format) in [
@@ -76,6 +78,7 @@ fn main() -> anyhow::Result<()> {
             "directories": stats.directories,
             "allocated": allocated,
             "errors": stats.errors.len(),
+            "entries_per_second": (stats.files + stats.directories) as f64 / elapsed_seconds,
         })
     );
     Ok(())
@@ -96,6 +99,21 @@ fn hud_benchmark() -> anyhow::Result<()> {
         let _ = context.run_ui(input, |ui| {
             let painter = ui.painter();
             let origin = ui.max_rect().min;
+            painter.rect_filled(ui.max_rect(), 0.0, egui::Color32::from_rgb(7, 9, 10));
+            for column in 0..=74 {
+                let x = origin.x + column as f32 * 26.0;
+                painter.line_segment(
+                    [egui::pos2(x, origin.y), egui::pos2(x, origin.y + 1080.0)],
+                    egui::Stroke::new(0.5, voidspace_app::hud::GRID),
+                );
+            }
+            for row in 0..=42 {
+                let y = origin.y + row as f32 * 26.0;
+                painter.line_segment(
+                    [egui::pos2(origin.x, y), egui::pos2(origin.x + 1920.0, y)],
+                    egui::Stroke::new(0.5, voidspace_app::hud::GRID),
+                );
+            }
             for index in 0..1024 {
                 let column = index % 32;
                 let row = index / 32;
@@ -110,7 +128,24 @@ fn hud_benchmark() -> anyhow::Result<()> {
                     egui::Stroke::new(1.0, voidspace_app::hud::HAIRLINE),
                     6.0,
                 );
+                painter.text(
+                    rect.left_top() + egui::vec2(5.0, 4.0),
+                    egui::Align2::LEFT_TOP,
+                    format!("{}M", index + 1),
+                    egui::FontId::monospace(8.0),
+                    egui::Color32::WHITE,
+                );
             }
+            let selected = egui::Rect::from_min_size(
+                origin + egui::vec2(58.0 * 5.0, 32.0 * 4.0),
+                egui::vec2(56.0, 30.0),
+            );
+            voidspace_app::hud::paint_corner_brackets(
+                painter,
+                selected,
+                voidspace_app::hud::ORANGE,
+            );
+            voidspace_app::hud::paint_reticle(painter, selected.center(), voidspace_app::hud::CYAN);
         });
     };
     for _ in 0..WARM_UP {

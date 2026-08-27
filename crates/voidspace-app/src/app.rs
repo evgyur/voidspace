@@ -325,6 +325,7 @@ pub struct VoidspaceApp {
     tactical_arc: Option<TacticalArcState>,
     volume_labels: VolumeDisplayRegistry,
     status_detail_modules: Vec<StatusModule>,
+    ui_frame_diagnostic: crate::diagnostics::UiFrameDiagnostic,
     settings: Settings,
 }
 
@@ -366,6 +367,7 @@ impl VoidspaceApp {
             tactical_arc: None,
             volume_labels: VolumeDisplayRegistry::default(),
             status_detail_modules: Vec::new(),
+            ui_frame_diagnostic: crate::diagnostics::UiFrameDiagnostic::default(),
             settings,
         };
         let arguments: Vec<String> = std::env::args().collect();
@@ -513,7 +515,7 @@ impl VoidspaceApp {
                 .and_then(|focused| roots.iter().position(|root| *root == focused))
                 .unwrap_or(0);
         }
-        if self.tabs.is_empty() || self.volume_switcher.open {
+        if self.tabs.is_empty() || self.volume_switcher.open || self.volume_picker_visible {
             let elapsed = self.volume_refresh_started_at.elapsed();
             if !self.volume_refresh_in_flight && elapsed >= VOLUME_REFRESH_INTERVAL {
                 self.request_volume_refresh(context);
@@ -1653,7 +1655,7 @@ impl VoidspaceApp {
         debug_assert_eq!(self.overlays.modal(), Some(ModalOverlay::PermanentDelete));
         let permanent = dialog.operation.kind == OperationKind::Permanent;
         let mut execute_now = false;
-        let mut cancel = false;
+        let mut cancel = context.input(|input| input.key_pressed(egui::Key::Escape));
         egui::Window::new(if permanent {
             "DELETE FOREVER"
         } else {
@@ -2024,6 +2026,47 @@ impl VoidspaceApp {
         }
         modules
     }
+
+    fn show_passive_toast(&mut self, context: &egui::Context) {
+        if !self.overlays.allows_passive_toast() {
+            return;
+        }
+        let Some(message) = self.toast.clone() else {
+            return;
+        };
+        let mut dismiss = false;
+        egui::Area::new(egui::Id::new("voidspace-passive-toast"))
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::RIGHT_BOTTOM, [-16.0, -64.0])
+            .show(context, |ui| {
+                egui::Frame::new()
+                    .fill(hud::PANEL_RAISED)
+                    .stroke(egui::Stroke::new(1.0, hud::ORANGE))
+                    .inner_margin(egui::Margin::symmetric(14, 10))
+                    .show(ui, |ui| {
+                        ui.set_max_width(360.0);
+                        ui.horizontal(|ui| {
+                            hud::paint_state_square(
+                                ui.painter(),
+                                ui.cursor().left_top() + egui::vec2(0.0, 5.0),
+                                hud::HudState::Warning,
+                            );
+                            ui.add_space(12.0);
+                            ui.label(
+                                egui::RichText::new(format!("NOTICE / {message}"))
+                                    .font(self.typography.font(theme::TypographyToken::DataCompact))
+                                    .color(theme::TEXT),
+                            );
+                            if ui.button("×").on_hover_text("Dismiss notice").clicked() {
+                                dismiss = true;
+                            }
+                        });
+                    });
+            });
+        if dismiss {
+            self.toast = None;
+        }
+    }
 }
 
 fn apply_volume_refresh(
@@ -2057,8 +2100,27 @@ fn treemap_navigation(ui: &mut egui::Ui, tab: &ScanTab) -> NavigationIntent {
     let mut intent = NavigationIntent::None;
     let path = tab.treemap_state.view_path.as_slice();
     let available_for_segments = (ui.available_width() - 116.0).max(160.0);
-    let max_visible = ((available_for_segments / 112.0).floor() as usize).clamp(2, 6);
-    let visible = collapsed_breadcrumb_indices(path.len(), max_visible);
+    let labels = path
+        .iter()
+        .map(|node_id| {
+            tab.snapshot
+                .node(*node_id)
+                .map(|node| truncate_volume_label(&node.name.display_escaped(), 18))
+                .unwrap_or_else(|| "?".into())
+        })
+        .collect::<Vec<_>>();
+    let label_widths = labels
+        .iter()
+        .map(|label| {
+            ui.fonts_mut(|fonts| {
+                fonts
+                    .layout_no_wrap(label.clone(), egui::FontId::monospace(10.0), theme::TEXT)
+                    .size()
+                    .x
+            })
+        })
+        .collect::<Vec<_>>();
+    let visible = collapsed_breadcrumb_for_width(&label_widths, available_for_segments);
     ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new("NAV / PATH")
@@ -2090,12 +2152,7 @@ fn treemap_navigation(ui: &mut egui::Ui, tab: &ScanTab) -> NavigationIntent {
                 continue;
             };
             let node_id = path[index];
-            let label = tab
-                .snapshot
-                .node(node_id)
-                .map(|node| node.name.display_escaped())
-                .map(|label| truncate_volume_label(&label, 26))
-                .unwrap_or_else(|| "?".into());
+            let label = &labels[index];
             let current = index + 1 == path.len();
             let response = ui.add(
                 egui::Button::new(
@@ -2134,6 +2191,22 @@ fn collapsed_breadcrumb_indices(length: usize, max_visible: usize) -> Vec<Option
     result.push(None);
     result.extend((length - tail_count..length).map(Some));
     result
+}
+
+fn collapsed_breadcrumb_for_width(widths: &[f32], available_width: f32) -> Vec<Option<usize>> {
+    let maximum = widths.len().clamp(2, 6);
+    for visible_count in (2..=maximum).rev() {
+        let indices = collapsed_breadcrumb_indices(widths.len(), visible_count);
+        let separators = indices.len().saturating_sub(1) as f32 * 22.0;
+        let cells = indices
+            .iter()
+            .map(|index| index.map_or(24.0, |index| widths[index] + 20.0))
+            .sum::<f32>();
+        if cells + separators <= available_width {
+            return indices;
+        }
+    }
+    collapsed_breadcrumb_indices(widths.len(), 2)
 }
 
 fn back_destination(view_path_len: usize, aggregate_views_len: usize) -> BackDestination {
@@ -2388,6 +2461,14 @@ impl eframe::App for VoidspaceApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let idle = self.tabs.iter().all(|tab| !tab.scanning || tab.paused)
+            && !self.overlays.owns_pointer()
+            && !self.fileop_running;
+        if let Some(frames) = self.ui_frame_diagnostic.record(Instant::now(), idle)
+            && frames > 3
+        {
+            tracing::warn!(frames, "idle UI frame budget exceeded");
+        }
         if self
             .typography
             .update_pixels_per_point(ui.ctx().pixels_per_point())
@@ -2401,6 +2482,7 @@ impl eframe::App for VoidspaceApp {
         self.workspace(ui);
         self.show_transient_overlays(ui.ctx());
         self.fileop_dialog(ui.ctx());
+        self.show_passive_toast(ui.ctx());
     }
 }
 
@@ -2607,7 +2689,10 @@ mod tab_close_tests {
 
 #[cfg(test)]
 mod back_navigation_tests {
-    use super::{BackDestination, back_destination, collapsed_breadcrumb_indices};
+    use super::{
+        BackDestination, back_destination, collapsed_breadcrumb_for_width,
+        collapsed_breadcrumb_indices,
+    };
 
     #[test]
     fn back_from_the_scan_root_opens_the_volume_picker() {
@@ -2626,6 +2711,19 @@ mod back_navigation_tests {
             collapsed_breadcrumb_indices(8, 4),
             vec![Some(0), None, Some(5), Some(6), Some(7)]
         );
+    }
+
+    #[test]
+    fn measured_breadcrumb_collapses_until_long_cells_fit() {
+        let indices = collapsed_breadcrumb_for_width(&[90.0; 8], 360.0);
+        assert_eq!(indices.first(), Some(&Some(0)));
+        assert_eq!(indices.last(), Some(&Some(7)));
+        let estimated = indices.len().saturating_sub(1) as f32 * 22.0
+            + indices
+                .iter()
+                .map(|index| index.map_or(24.0, |index| [90.0; 8][index] + 20.0))
+                .sum::<f32>();
+        assert!(estimated <= 360.0);
     }
 }
 

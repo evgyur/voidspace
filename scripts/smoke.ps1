@@ -35,6 +35,20 @@ try {
     $after = $afterJson | ConvertFrom-Json
     if ($after.files -le $before.files) { throw 'mutation was not reflected by a fresh scan' }
 
+    $throughputs = @()
+    for ($run = 0; $run -lt 5; $run++) {
+        $benchmarkOut = Join-Path $smokeBase ("throughput-" + $run)
+        New-Item -ItemType Directory -Force $benchmarkOut | Out-Null
+        $runJson = & cargo run --quiet -p voidspace-app --bin voidspace-smoke --release -- $root $benchmarkOut
+        if ($LASTEXITCODE -ne 0) { throw "scanner throughput run $run failed" }
+        $runResult = $runJson | ConvertFrom-Json
+        $throughputs += [double]$runResult.entries_per_second
+    }
+    $sortedThroughputs = @($throughputs | Sort-Object)
+    $medianThroughput = $sortedThroughputs[2]
+    if ($medianThroughput -le 0) { throw 'scanner throughput median was not positive' }
+    Write-Output (ConvertTo-Json -Compress @{ scanner_runs = 5; median_entries_per_second = $medianThroughput; all_entries_per_second = $throughputs })
+
     & cargo run --quiet -p voidspace-app --bin voidspace-smoke --release -- --delete $root $deleteTarget | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'guarded permanent-delete smoke failed' }
     if (Test-Path -LiteralPath $deleteTarget) { throw 'guarded deletion left its target behind' }
