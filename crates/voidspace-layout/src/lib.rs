@@ -7,6 +7,7 @@ pub use hit_test::*;
 pub use squarify::*;
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use voidspace_index::IndexSnapshot;
 use voidspace_model::{DirtySet, NodeId};
 
@@ -311,6 +312,177 @@ mod aggregation_tests {
         assert_eq!(other.min_y, bounds.min_y);
         assert_eq!(other.max_y, bounds.max_y);
         assert!(other.width() >= 72.0);
+    }
+}
+
+/// Lays out a selected group of direct children as a virtual full-screen level.
+/// This is used to drill into an `OTHER` aggregate without inventing fake nodes
+/// or losing the real filesystem parent.
+pub fn layout_subset(
+    snapshot: &IndexSnapshot,
+    view: &ViewState,
+    member_ids: &[NodeId],
+    _dirty: &DirtySet,
+) -> LayoutSnapshot {
+    let mut seen = HashSet::new();
+    let mut children = member_ids
+        .iter()
+        .copied()
+        .filter(|id| seen.insert(*id))
+        .filter_map(|id| snapshot.node(id).map(|node| (id, node)))
+        .filter(|(_, node)| node.parent == Some(view.root))
+        .filter(|(_, node)| match view.size_mode {
+            SizeMode::Allocated => node.allocated > 0,
+            SizeMode::Logical => node.logical > 0,
+        })
+        .collect::<Vec<_>>();
+    children.sort_by(|(left_id, left), (right_id, right)| {
+        let left_size = match view.size_mode {
+            SizeMode::Allocated => left.allocated,
+            SizeMode::Logical => left.logical,
+        };
+        let right_size = match view.size_mode {
+            SizeMode::Allocated => right.allocated,
+            SizeMode::Logical => right.logical,
+        };
+        right_size.cmp(&left_size).then(left_id.cmp(right_id))
+    });
+    let weights = children
+        .iter()
+        .map(|(_, node)| match view.size_mode {
+            SizeMode::Allocated => node.allocated,
+            SizeMode::Logical => node.logical,
+        })
+        .collect::<Vec<_>>();
+    let partition = partition_children(
+        &weights,
+        view.bounds,
+        view.min_label,
+        view.min_area,
+        view.max_rectangles,
+    );
+    let mut nodes = vec![LayoutNode {
+        node_id: view.root,
+        parent_id: snapshot.node(view.root).and_then(|node| node.parent),
+        rect: view.bounds,
+        depth: 0,
+        aggregated: false,
+        aggregate_count: 0,
+        aggregate_size: 0,
+    }];
+    nodes.extend(
+        children
+            .iter()
+            .take(partition.aggregate_start)
+            .zip(partition.rectangles.iter().copied())
+            .map(|((node_id, _), rect)| LayoutNode {
+                node_id: *node_id,
+                parent_id: Some(view.root),
+                rect,
+                depth: 1,
+                aggregated: false,
+                aggregate_count: 0,
+                aggregate_size: 0,
+            }),
+    );
+    let mut aggregates = Vec::new();
+    if partition.aggregate_count > 0 {
+        let member_ids = children[partition.aggregate_start..]
+            .iter()
+            .map(|(node_id, _)| *node_id)
+            .collect::<Vec<_>>();
+        aggregates.push(AggregateGroup {
+            parent_id: view.root,
+            depth: 1,
+            member_ids: member_ids.clone(),
+            size: partition.aggregate_size,
+        });
+        if let Some(rect) = partition.aggregate_rect {
+            nodes.push(LayoutNode {
+                node_id: view.root,
+                parent_id: Some(view.root),
+                rect,
+                depth: 1,
+                aggregated: true,
+                aggregate_count: member_ids.len().min(u32::MAX as usize) as u32,
+                aggregate_size: partition.aggregate_size,
+            });
+        }
+    }
+    LayoutSnapshot {
+        index_version: snapshot.index_version,
+        root: view.root,
+        nodes,
+        aggregates,
+    }
+}
+
+#[cfg(test)]
+mod subset_layout_tests {
+    use std::sync::Arc;
+
+    use voidspace_index::{IndexSnapshot, NodeSnapshot};
+    use voidspace_model::{FileIdentity, NodeFlags, NodeId, NodeKind, ScanId, VolumeId, WinName};
+
+    use super::*;
+
+    fn node(id: u32, parent: Option<u32>, children: Vec<u32>, allocated: u64) -> NodeSnapshot {
+        NodeSnapshot {
+            id: NodeId(id),
+            parent: parent.map(NodeId),
+            children: children.into_iter().map(NodeId).collect(),
+            name: WinName::from(format!("node-{id}")),
+            identity: FileIdentity::stable(VolumeId::local_for_test(1), u128::from(id), 1),
+            kind: if allocated == 0 {
+                NodeKind::Directory
+            } else {
+                NodeKind::File
+            },
+            flags: NodeFlags::default(),
+            logical: allocated,
+            allocated,
+            physical_allocated: allocated,
+        }
+    }
+
+    #[test]
+    fn subset_layout_expands_only_the_requested_other_members() {
+        let snapshot = IndexSnapshot {
+            scan_id: ScanId(1),
+            generation: 1,
+            index_version: 7,
+            root: NodeId(1),
+            nodes: Arc::new(vec![
+                node(1, None, vec![2, 3, 4], 0),
+                node(2, Some(1), vec![], 90),
+                node(3, Some(1), vec![], 60),
+                node(4, Some(1), vec![], 30),
+            ]),
+        };
+        let view = ViewState {
+            root: NodeId(1),
+            bounds: Rect::new(0.0, 0.0, 900.0, 600.0),
+            size_mode: SizeMode::Allocated,
+            max_depth: 1,
+            min_area: 1.0,
+            min_label: LabelFootprint::new(1.0, 1.0),
+            max_rectangles: 128,
+        };
+
+        let result = layout_subset(
+            &snapshot,
+            &view,
+            &[NodeId(3), NodeId(4)],
+            &DirtySet::default(),
+        );
+        let visible = result
+            .nodes
+            .iter()
+            .filter(|node| node.depth == 1 && !node.aggregated)
+            .map(|node| node.node_id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(visible, vec![NodeId(3), NodeId(4)]);
     }
 }
 

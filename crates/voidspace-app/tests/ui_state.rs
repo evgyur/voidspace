@@ -35,12 +35,12 @@ fn diagnostics_redacts_user_profile_and_newlines() {
 }
 
 #[test]
-fn hover_preview_temporarily_wins_over_a_pinned_tile() {
+fn pinned_preview_stays_open_when_hover_moves_elsewhere() {
     let state = PreviewState {
         pinned: Some(NodeId(10)),
     };
 
-    assert_eq!(state.active(Some(NodeId(20))), Some(NodeId(20)));
+    assert_eq!(state.active(Some(NodeId(20))), Some(NodeId(10)));
     assert_eq!(state.active(None), Some(NodeId(10)));
 }
 

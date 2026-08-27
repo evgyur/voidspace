@@ -441,11 +441,18 @@ fn action_for_hit(hit: &ActionHit, activation: Activation) -> TreemapAction {
             parent,
             depth,
             members,
-        } => TreemapAction::OpenAggregate(AggregateSelection {
-            parent: *parent,
-            depth: *depth,
-            members: members.clone(),
-        }),
+        } => {
+            let selection = AggregateSelection {
+                parent: *parent,
+                depth: *depth,
+                members: members.clone(),
+            };
+            if matches!(activation, Activation::Double | Activation::KeyboardZoom) {
+                TreemapAction::ZoomAggregate(selection)
+            } else {
+                TreemapAction::OpenAggregate(selection)
+            }
+        }
         HitKind::BaseDirectory
             if matches!(activation, Activation::Double | Activation::KeyboardZoom) =>
         {
@@ -470,7 +477,7 @@ pub struct PreviewState {
 
 impl PreviewState {
     pub fn active(self, hovered: Option<NodeId>) -> Option<NodeId> {
-        hovered.or(self.pinned)
+        self.pinned.or(hovered)
     }
 
     pub fn apply_canvas_click(&mut self, pin_target: Option<NodeId>) {
@@ -641,7 +648,7 @@ pub fn show(ui: &mut Ui, request: ShowRequest<'_>) -> TreemapResponse {
             })
         })
         .unwrap_or_default();
-    let active_base = hovered_base.or_else(|| persistent_chain.first().copied());
+    let active_base = persistent_chain.first().copied().or(hovered_base);
 
     let mut rendered_aggregates = base_layout
         .aggregates
@@ -835,7 +842,7 @@ pub fn show(ui: &mut Ui, request: ShowRequest<'_>) -> TreemapResponse {
             let persistent_child = persistent_index
                 .and_then(|index| persistent_chain.get(index + 1))
                 .copied();
-            let next_active = hovered_child.or(persistent_child);
+            let next_active = persistent_child.or(hovered_child);
 
             for (rank, node) in nested_layout
                 .nodes
@@ -952,7 +959,7 @@ fn hit_responses(
                 )
             });
             let hint = if hit.aggregated {
-                "Click: inspect grouped items"
+                "Click: inspect · Double-click: open OTHER"
             } else if hit.expandable {
                 "Click: expand · Double-click: zoom"
             } else {
@@ -1165,7 +1172,7 @@ mod interaction_tests {
     }
 
     #[test]
-    fn nested_leaf_preserves_pin_and_other_never_zooms() {
+    fn nested_leaf_preserves_pin_and_other_opens_as_a_virtual_level() {
         let nested = ActionHit::nested(NodeId(8), false);
         assert_eq!(
             action_for_hit(&nested, Activation::Single),
@@ -1188,8 +1195,12 @@ mod interaction_tests {
 
         let other = ActionHit::aggregate(NodeId(2), 1, vec![NodeId(9), NodeId(10)]);
         assert!(matches!(
-            action_for_hit(&other, Activation::Double),
+            action_for_hit(&other, Activation::Single),
             crate::TreemapAction::OpenAggregate(_)
+        ));
+        assert!(matches!(
+            action_for_hit(&other, Activation::Double),
+            crate::TreemapAction::ZoomAggregate(_)
         ));
     }
 

@@ -14,6 +14,7 @@ pub enum TreemapAction {
     ActivateNested(NodeId),
     Zoom(NodeId),
     OpenAggregate(AggregateSelection),
+    ZoomAggregate(AggregateSelection),
     ClearPreview,
 }
 
@@ -77,6 +78,7 @@ pub struct TreemapState {
     pub selected: Option<NodeId>,
     pub pinned: Option<NodeId>,
     pub aggregate: Option<AggregateSelection>,
+    pub aggregate_views: Vec<AggregateSelection>,
 }
 
 impl TreemapState {
@@ -86,6 +88,7 @@ impl TreemapState {
             selected: None,
             pinned: None,
             aggregate: None,
+            aggregate_views: Vec::new(),
         }
     }
 
@@ -109,14 +112,42 @@ impl TreemapState {
                 self.selected = Some(id);
                 self.pinned = None;
                 self.aggregate = None;
+                self.aggregate_views.clear();
             }
             TreemapAction::OpenAggregate(selection) => {
                 self.selected = Some(selection.parent);
                 self.pinned = None;
                 self.aggregate = Some(selection);
             }
+            TreemapAction::ZoomAggregate(selection) => {
+                self.selected = Some(selection.parent);
+                self.pinned = None;
+                self.aggregate = None;
+                if self.aggregate_views.last() != Some(&selection) {
+                    self.aggregate_views.push(selection);
+                }
+            }
             TreemapAction::ClearPreview => self.pinned = None,
         }
+    }
+
+    pub fn back(&mut self) -> Option<NodeId> {
+        if self.aggregate_views.pop().is_some() {
+            self.pinned = None;
+            self.aggregate = None;
+            let target = self
+                .aggregate_views
+                .last()
+                .map_or_else(|| self.view_path.current(), |group| group.parent);
+            self.selected = Some(target);
+            return Some(target);
+        }
+        self.view_path.back()
+    }
+
+    pub fn jump_to(&mut self, target: NodeId) -> Option<NodeId> {
+        self.aggregate_views.clear();
+        self.view_path.jump_to(target)
     }
 
     pub fn repair(
@@ -139,10 +170,27 @@ impl TreemapState {
         if self.pinned.is_some_and(|id| !exists(id)) {
             self.pinned = None;
         }
-        if self.aggregate.as_ref().is_some_and(|group| {
-            !exists(group.parent) || group.members.iter().any(|id| !exists(*id))
-        }) {
+        if self
+            .aggregate
+            .as_ref()
+            .is_some_and(|group| !valid_group(group, &mut exists, &mut parent_of))
+        {
             self.aggregate = None;
         }
+        self.aggregate_views
+            .retain(|group| valid_group(group, &mut exists, &mut parent_of));
     }
+}
+
+fn valid_group(
+    group: &AggregateSelection,
+    exists: &mut impl FnMut(NodeId) -> bool,
+    parent_of: &mut impl FnMut(NodeId) -> Option<NodeId>,
+) -> bool {
+    exists(group.parent)
+        && !group.members.is_empty()
+        && group
+            .members
+            .iter()
+            .all(|id| exists(*id) && parent_of(*id) == Some(group.parent))
 }

@@ -12,8 +12,10 @@ use voidspace_fileops::{
 };
 use voidspace_filter::{Expr, parse};
 use voidspace_index::{Index, IndexSnapshot};
-use voidspace_layout::{LayoutSnapshot, Rect as LayoutRect, SizeMode, ViewState, layout};
-use voidspace_model::{DirtySet, EventEnvelope, EventPayload, NodeId};
+use voidspace_layout::{
+    LayoutSnapshot, Rect as LayoutRect, SizeMode, ViewState, layout, layout_subset,
+};
+use voidspace_model::{DirtySet, EventEnvelope, EventPayload, NodeId, WinName};
 use voidspace_scan::{ScanHandle, ScanRequest, describe_root, start};
 use voidspace_watch::{WatchHandle, WatchRequest, WatchSignal, watch};
 
@@ -65,6 +67,131 @@ struct ScanTab {
     last_watch_event: Option<Instant>,
     errors: Vec<String>,
     volume_usage: Option<volume::VolumeUsage>,
+    pending_navigation: Option<TreemapBookmark>,
+}
+
+#[derive(Clone, Debug)]
+struct AggregateBookmark {
+    parent: Vec<WinName>,
+    depth: usize,
+    members: Vec<Vec<WinName>>,
+}
+
+#[derive(Clone, Debug)]
+struct TreemapBookmark {
+    view: Vec<WinName>,
+    selected: Option<Vec<WinName>>,
+    pinned: Option<Vec<WinName>>,
+    aggregate: Option<AggregateBookmark>,
+    aggregate_views: Vec<AggregateBookmark>,
+}
+
+impl TreemapBookmark {
+    fn capture(snapshot: &IndexSnapshot, state: &TreemapState) -> Self {
+        Self {
+            view: logical_path(snapshot, state.view_path.current()).unwrap_or_default(),
+            selected: state.selected.and_then(|id| logical_path(snapshot, id)),
+            pinned: state.pinned.and_then(|id| logical_path(snapshot, id)),
+            aggregate: state
+                .aggregate
+                .as_ref()
+                .and_then(|group| capture_aggregate(snapshot, group)),
+            aggregate_views: state
+                .aggregate_views
+                .iter()
+                .filter_map(|group| capture_aggregate(snapshot, group))
+                .collect(),
+        }
+    }
+
+    fn restore(self, snapshot: &IndexSnapshot) -> TreemapState {
+        let mut state = TreemapState::new(snapshot.root);
+        if let Some(view) = resolve_logical_path(snapshot, &self.view) {
+            let _ = state
+                .view_path
+                .rebuild(view, |id| snapshot.node(id).and_then(|node| node.parent));
+        }
+        state.selected = self
+            .selected
+            .as_deref()
+            .and_then(|path| resolve_logical_path(snapshot, path))
+            .or(Some(state.view_path.current()));
+        state.pinned = self
+            .pinned
+            .as_deref()
+            .and_then(|path| resolve_logical_path(snapshot, path));
+        state.aggregate = self
+            .aggregate
+            .and_then(|group| restore_aggregate(snapshot, group));
+        state.aggregate_views = self
+            .aggregate_views
+            .into_iter()
+            .filter_map(|group| restore_aggregate(snapshot, group))
+            .collect();
+        state
+    }
+}
+
+fn logical_path(snapshot: &IndexSnapshot, target: NodeId) -> Option<Vec<WinName>> {
+    let mut path = Vec::new();
+    let mut current = target;
+    while current != snapshot.root {
+        let node = snapshot.node(current)?;
+        path.push(node.name.clone());
+        current = node.parent?;
+    }
+    path.reverse();
+    Some(path)
+}
+
+fn resolve_logical_path(snapshot: &IndexSnapshot, path: &[WinName]) -> Option<NodeId> {
+    let mut current = snapshot.root;
+    for segment in path {
+        current = snapshot
+            .node(current)?
+            .children
+            .iter()
+            .copied()
+            .find(|child| {
+                snapshot
+                    .node(*child)
+                    .is_some_and(|node| node.name == *segment)
+            })?;
+    }
+    Some(current)
+}
+
+fn capture_aggregate(
+    snapshot: &IndexSnapshot,
+    group: &crate::AggregateSelection,
+) -> Option<AggregateBookmark> {
+    Some(AggregateBookmark {
+        parent: logical_path(snapshot, group.parent)?,
+        depth: group.depth,
+        members: group
+            .members
+            .iter()
+            .filter_map(|id| logical_path(snapshot, *id))
+            .collect(),
+    })
+}
+
+fn restore_aggregate(
+    snapshot: &IndexSnapshot,
+    group: AggregateBookmark,
+) -> Option<crate::AggregateSelection> {
+    let parent = resolve_logical_path(snapshot, &group.parent)?;
+    let members = group
+        .members
+        .iter()
+        .filter_map(|path| resolve_logical_path(snapshot, path))
+        .filter(|id| snapshot.node(*id).and_then(|node| node.parent) == Some(parent))
+        .collect::<Vec<_>>();
+    (!members.is_empty()).then_some(crate::AggregateSelection {
+        parent,
+        depth: group.depth,
+        members,
+    })
 }
 
 impl ScanTab {
@@ -293,6 +420,7 @@ impl VoidspaceApp {
             last_watch_event: None,
             errors: Vec::new(),
             volume_usage,
+            pending_navigation: None,
         });
         self.active_tab = self.tabs.len() - 1;
         true
@@ -385,7 +513,12 @@ impl VoidspaceApp {
                     tab.scanning = false;
                 }
             }
-            if !dirty.is_empty() {
+            if tab.pending_navigation.is_some() && !tab.scanning {
+                tab.snapshot = tab.index.snapshot();
+                if let Some(bookmark) = tab.pending_navigation.take() {
+                    tab.treemap_state = bookmark.restore(&tab.snapshot);
+                }
+            } else if !dirty.is_empty() && tab.pending_navigation.is_none() {
                 tab.snapshot = tab.index.snapshot();
                 let snapshot = &tab.snapshot;
                 tab.treemap_state.repair(
@@ -420,14 +553,14 @@ impl VoidspaceApp {
             tab.errors.push("Scan root is no longer available".into());
             return;
         };
+        let navigation = TreemapBookmark::capture(&tab.snapshot, &tab.treemap_state);
         tab.index = Index::new(
             voidspace_model::ScanId((tab_index + 1) as u64),
             tab.generation,
             root.identity,
             root.name,
         );
-        tab.snapshot = tab.index.snapshot();
-        tab.treemap_state = TreemapState::new(tab.snapshot.root);
+        tab.pending_navigation = Some(navigation);
         tab.volume_usage = volume::query(&tab.root_path);
         let (event_tx, event_rx) = bounded(65_536);
         tab.events = event_rx;
@@ -446,7 +579,11 @@ impl VoidspaceApp {
                 tab.pending_rescan = false;
                 tab.files_seen = 0;
             }
-            Err(error) => tab.errors.push(error.to_string()),
+            Err(error) => {
+                tab.pending_navigation = None;
+                tab.pending_rescan = false;
+                tab.errors.push(error.to_string());
+            }
         }
     }
 
@@ -718,7 +855,8 @@ impl VoidspaceApp {
                 }
                 if ui
                     .add_enabled(
-                        tab.treemap_state.view_path.as_slice().len() > 1,
+                        tab.treemap_state.view_path.as_slice().len() > 1
+                            || !tab.treemap_state.aggregate_views.is_empty(),
                         egui::Button::new("BACK"),
                     )
                     .clicked()
@@ -997,7 +1135,11 @@ impl VoidspaceApp {
                 let navigation = treemap_navigation(ui, tab);
                 apply_navigation(tab, navigation);
                 ui.separator();
-                let view_root = tab.treemap_state.view_path.current();
+                let aggregate_view = tab.treemap_state.aggregate_views.last().cloned();
+                let view_root = aggregate_view.as_ref().map_or_else(
+                    || tab.treemap_state.view_path.current(),
+                    |group| group.parent,
+                );
                 let available = ui.available_rect_before_wrap();
                 let metrics = treemap::candidate_metrics(
                     ui,
@@ -1006,24 +1148,25 @@ impl VoidspaceApp {
                     1024,
                     &self.typography,
                 );
-                tab.layout = layout(
-                    &tab.snapshot,
-                    &ViewState {
-                        root: view_root,
-                        bounds: LayoutRect::new(
-                            available.left(),
-                            available.top(),
-                            available.right(),
-                            available.bottom(),
-                        ),
-                        size_mode: SizeMode::Allocated,
-                        max_depth: 1,
-                        min_area: 196.0,
-                        min_label: metrics.footprint(),
-                        max_rectangles: 1024,
-                    },
-                    &DirtySet::default(),
-                );
+                let view = ViewState {
+                    root: view_root,
+                    bounds: LayoutRect::new(
+                        available.left(),
+                        available.top(),
+                        available.right(),
+                        available.bottom(),
+                    ),
+                    size_mode: SizeMode::Allocated,
+                    max_depth: 1,
+                    min_area: 196.0,
+                    min_label: metrics.footprint(),
+                    max_rectangles: 1024,
+                };
+                tab.layout = if let Some(group) = aggregate_view.as_ref() {
+                    layout_subset(&tab.snapshot, &view, &group.members, &DirtySet::default())
+                } else {
+                    layout(&tab.snapshot, &view, &DirtySet::default())
+                };
                 let pin_is_eligible = tab.treemap_state.pinned.is_some_and(|pinned| {
                     treemap::preview_chain(view_root, pinned, |id| {
                         tab.snapshot.node(id).and_then(|node| node.parent)
@@ -1285,7 +1428,8 @@ fn treemap_navigation(ui: &mut egui::Ui, tab: &ScanTab) -> NavigationIntent {
     ui.horizontal(|ui| {
         if ui
             .add_enabled(
-                tab.treemap_state.view_path.as_slice().len() > 1,
+                tab.treemap_state.view_path.as_slice().len() > 1
+                    || !tab.treemap_state.aggregate_views.is_empty(),
                 egui::Button::new("← BACK"),
             )
             .clicked()
@@ -1314,6 +1458,14 @@ fn treemap_navigation(ui: &mut egui::Ui, tab: &ScanTab) -> NavigationIntent {
                 intent = NavigationIntent::Jump(node_id);
             }
         }
+        for group in &tab.treemap_state.aggregate_views {
+            ui.label(egui::RichText::new("›").color(theme::MUTED));
+            ui.label(
+                egui::RichText::new(format!("OTHER · {}", group.members.len()))
+                    .color(theme::ORANGE)
+                    .strong(),
+            );
+        }
     });
     intent
 }
@@ -1321,8 +1473,8 @@ fn treemap_navigation(ui: &mut egui::Ui, tab: &ScanTab) -> NavigationIntent {
 fn apply_navigation(tab: &mut ScanTab, intent: NavigationIntent) {
     let target = match intent {
         NavigationIntent::None => None,
-        NavigationIntent::Back => tab.treemap_state.view_path.back(),
-        NavigationIntent::Jump(node_id) => tab.treemap_state.view_path.jump_to(node_id),
+        NavigationIntent::Back => tab.treemap_state.back(),
+        NavigationIntent::Jump(node_id) => tab.treemap_state.jump_to(node_id),
     };
     if let Some(target) = target {
         tab.treemap_state.selected = Some(target);
@@ -1564,6 +1716,85 @@ mod worker_budget_tests {
             1,
             MAX_SCAN_WORK_PER_FRAME - Duration::from_nanos(1)
         ));
+    }
+}
+
+#[cfg(test)]
+mod navigation_bookmark_tests {
+    use std::sync::Arc;
+
+    use voidspace_index::{IndexSnapshot, NodeSnapshot};
+    use voidspace_model::{FileIdentity, NodeFlags, NodeId, NodeKind, ScanId, VolumeId, WinName};
+
+    use super::TreemapBookmark;
+    use crate::{AggregateSelection, TreemapState};
+
+    fn node(id: u32, parent: Option<u32>, children: Vec<u32>, name: &str) -> NodeSnapshot {
+        NodeSnapshot {
+            id: NodeId(id),
+            parent: parent.map(NodeId),
+            children: children.into_iter().map(NodeId).collect(),
+            name: WinName::from(name),
+            identity: FileIdentity::stable(VolumeId::local_for_test(1), u128::from(id), 1),
+            kind: if name == "leaf" || name == "B" {
+                NodeKind::File
+            } else {
+                NodeKind::Directory
+            },
+            flags: NodeFlags::default(),
+            logical: 1,
+            allocated: 1,
+            physical_allocated: 1,
+        }
+    }
+
+    fn snapshot(reordered: bool) -> IndexSnapshot {
+        let nodes = if reordered {
+            vec![
+                node(0, None, vec![1, 2], "root"),
+                node(1, Some(0), vec![], "B"),
+                node(2, Some(0), vec![3], "A"),
+                node(3, Some(2), vec![], "leaf"),
+            ]
+        } else {
+            vec![
+                node(0, None, vec![1, 2], "root"),
+                node(1, Some(0), vec![3], "A"),
+                node(2, Some(0), vec![], "B"),
+                node(3, Some(1), vec![], "leaf"),
+            ]
+        };
+        IndexSnapshot {
+            scan_id: ScanId(1),
+            generation: 1,
+            index_version: 1,
+            root: NodeId(0),
+            nodes: Arc::new(nodes),
+        }
+    }
+
+    #[test]
+    fn full_rescan_restores_navigation_by_logical_path_not_transient_node_id() {
+        let old = snapshot(false);
+        let mut state = TreemapState::new(old.root);
+        state
+            .view_path
+            .rebuild(NodeId(1), |id| old.node(id).and_then(|node| node.parent))
+            .expect("old view path");
+        state.selected = Some(NodeId(3));
+        state.pinned = Some(NodeId(1));
+        state.aggregate_views.push(AggregateSelection {
+            parent: NodeId(0),
+            depth: 1,
+            members: vec![NodeId(2)],
+        });
+
+        let restored = TreemapBookmark::capture(&old, &state).restore(&snapshot(true));
+
+        assert_eq!(restored.view_path.current(), NodeId(2));
+        assert_eq!(restored.selected, Some(NodeId(3)));
+        assert_eq!(restored.pinned, Some(NodeId(2)));
+        assert_eq!(restored.aggregate_views[0].members, vec![NodeId(1)]);
     }
 }
 
