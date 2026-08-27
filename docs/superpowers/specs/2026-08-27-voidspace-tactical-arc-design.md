@@ -13,6 +13,8 @@ This slice changes presentation and interaction only. File-operation semantics r
 
 Build target: the selected interactive `TACTICAL ARC` prototype from the Voidspace Radial Command System visual lab.
 
+Prototype artifact: `C:\Users\user\.github\voidspace\.superpowers\brainstorm\46223-1787827624\radial-menu-options.html`, card `03 / TACTICAL ARC`.
+
 Primary reference: Axiom's dark observability-console system.
 
 - Preserve near-black and graphite surfaces, thin structural borders, compact machine typography, and orange reserved for active focus.
@@ -38,6 +40,10 @@ Must not drift:
 - The clicked node becomes the current context target and selection, preserving existing behavior.
 - Aggregate `OTHER` tiles remain non-file actions and do not expose destructive actions until opened to real members.
 - Only one Tactical Arc may be open at a time.
+- `Shift+F10` or the keyboard Context Menu key opens Tactical Arc for the focused real tile; if no real tile has focus, the command does nothing.
+- While Tactical Arc is open, its full-canvas input shield consumes pointer and keyboard events before the treemap. A second right-click dismisses the current menu; it never simultaneously retargets another tile or activates underlying treemap content.
+
+The menu stores a fail-closed `ContextTarget` containing the tab identity, node identity, snapshot version, captured absolute path, node kind, and invocation-time treemap root. Before emitting any action, the application resolves the node again and requires every stored field to match. A tab switch, rescan/restart, missing or renamed node, changed path/kind, changed treemap root, or snapshot replacement dismisses the menu and shows `TARGET CHANGED · OPEN AGAIN`. No action is emitted from stale state.
 
 ### Geometry
 
@@ -52,30 +58,38 @@ Must not drift:
   3. `VOID` / permanent deletion — danger red.
 - A compact detail rail opposite the fan shows the full action label and `LMB TO EXECUTE`.
 
+The sector definition is one constant table shared by rendering, hit testing, accessibility labels, keyboard selection, and tests. It contains action, short label, full label, semantic color, and keyboard index. Rendered ordering never comes from a separate list.
+
 ### Edge awareness
 
-- The fan chooses the side with the most available viewport space.
-- Near the right edge it opens leftward; near the left edge it opens rightward.
-- Near top or bottom edges, its center is clamped so the full fan and label rail stay visible.
+- Geometry is contained by the current treemap canvas rectangle, excluding the top bar, tab bar, status bar, and inspector.
+- The fan evaluates right-facing and left-facing candidates, including a fixed 152×44-point label rail and an 8-point safe margin. It chooses a fully contained candidate; if both fit, it chooses the side with more free horizontal space.
+- Near the right edge it opens leftward; near the left edge it opens rightward. In both orientations the visual top-to-bottom order remains Explorer, Recycle, Permanent; semantic ordering is not accidentally reversed by mirroring.
+- Near top or bottom edges, its hub is clamped so the full fan and label rail stay visible.
 - The interaction origin remains visually connected to the clamped hub when displacement is required.
+- The tether is a straight 1-point line from the original click point to the clamped hub and is painted only when displacement exceeds 2 points.
+- The minimum supported menu bounding box is 224×224 points plus the label rail. If the treemap canvas is smaller, the menu uses a 0.75 geometry scale, ellipsizes the detail rail, and centers the combined bounds. If even the minimum scaled bounds cannot fit, opening fails closed with `WINDOW TOO SMALL FOR COMMAND MENU` rather than painting outside the canvas.
 
 ### Pointer line and selection
 
 - A 1–2 px luminous line runs from the hub toward the live pointer position.
-- The pointer angle selects one wedge; selection does not execute an action.
+- The hub is a dead zone. Gaps between sectors and coordinates outside the fan are neutral zones. Pointer opening starts with no selected action until the pointer enters a sector.
+- The pointer angle and radius together select one wedge; selection does not execute an action.
 - The selected wedge receives a brighter outline, low-opacity semantic fill, and readable action label.
 - Movement remains immediate and deterministic; no spring physics or delayed hover timers.
 - `Esc`, right-click again, or clicking outside closes the menu without action.
-- Left-click inside the selected wedge executes that action and closes the menu.
-- Left-click inside the hub closes without action.
+- Left-click resolves hit testing again at the click coordinate. It executes only the wedge under that coordinate, never a previously stored highlight.
+- Left-click in the hub, a sector gap, outside the fan, or outside the menu dismisses without action.
 
 ### Keyboard and accessibility
 
-- While open, `1`, `2`, and `3` select Explorer, Recycle, and permanent delete.
-- `Enter` executes the selected action.
-- Arrow Up/Down cycles sectors.
-- Focus remains trapped in the menu until action or dismissal.
-- Every sector exposes a semantic label and action description for egui accessibility metadata.
+- Keyboard opening starts with Explorer selected as the safe default. Pointer opening starts with no selection.
+- While open, `1`, `2`, and `3` directly select Explorer, Recycle, and permanent delete.
+- `Enter` executes the selected action. With no selection it does nothing.
+- Arrow Up/Down and Tab/Shift+Tab cycle sectors in safe-to-destructive / reverse order.
+- Focus remains trapped in the menu until action or dismissal, then returns to the originating tile when it still exists; otherwise it returns to the treemap canvas.
+- The foreground `egui::Area` creates three explicit focusable accessibility responses with button roles, action names, object name, and destructive-state descriptions. The custom-painted wedges do not rely on paint alone for accessibility.
+- All handled pointer buttons and keys are explicitly consumed so underlying treemap navigation cannot fire in the same frame.
 
 ### File-operation safety
 
@@ -90,13 +104,13 @@ Create a focused `radial_menu` module owned by `voidspace-app`.
 
 Responsibilities:
 
-- `TacticalArcState`: target node, invocation origin, clamped hub, orientation, highlighted action.
+- `TacticalArcState`: validated `ContextTarget`, invocation origin, clamped hub, orientation, highlighted action, input mode, and origin focus identity.
 - Pure geometry functions: fan orientation, sector paths, hit testing, clamping, and keyboard selection.
-- `show`: render the overlay at foreground order and return an optional existing `TreemapContextAction`.
+- `show`: render a foreground `egui::Area` with a full-canvas input shield and return an explicit lifecycle outcome: `Open(updated_state)`, `Dismissed(reason)`, or `Action(TreemapContextAction)`.
 
 The treemap remains responsible for detecting the right-clicked real node and returning the context target. The application owns opening/closing radial state and translating the returned action into the existing inspector/file-operation pipeline.
 
-The old `egui::Response::context_menu` block is removed after the new path is verified. No second context-menu implementation remains.
+State is invalidated before painting whenever target validation fails. The old `egui::Response::context_menu` block is removed after the new path is verified. No second context-menu implementation remains.
 
 ## 5. Bottom status bar alignment
 
@@ -104,11 +118,13 @@ The old `egui::Response::context_menu` block is removed after the new path is ve
 - The horizontal metric row fills the available content height.
 - Every metric block uses a vertical layout centered on the cross axis.
 - Label and value remain grouped with a fixed internal gap; separators span the intended instrument height and are centered with the group.
-- The result must have visually equal breathing room above and below the tallest value line at 100%, 125%, and 150% Windows scaling.
+- Metric label/value group height is measured from actual galley rectangles. Its top and bottom free space inside the panel must differ by no more than one logical point.
+- Separators are 30 logical points tall and share the panel's vertical center within one logical point.
+- These invariants hold at 100%, 125%, and 150% Windows scaling.
 
 ## 6. About / Author
 
-Add a compact `ABOUT` trigger in the top bar, visually subordinate to scan controls and Turbo.
+Add a compact `ABOUT` trigger in the top bar, visually subordinate to scan controls and Turbo. At widths below the existing compact top-bar breakpoint it collapses to a 28-point `i` control with tooltip `ABOUT / AUTHOR`; it never pushes the path, filter, or Turbo controls outside the window.
 
 The panel contains:
 
@@ -128,24 +144,27 @@ The panel contains:
 
 Links open through the operating system's default browser. The panel contains no tracking, remote embeds, or account data.
 
+The link definitions are one constant table shared by rendering and tests. About is a single non-modal foreground panel: the trigger toggles it; `Esc`, outside click, or opening the disk switcher closes it. It is clamped inside the application viewport and cannot coexist with Tactical Arc.
+
 ## 7. Motion
 
-- Open: 90–120 ms opacity and radial expansion from the hub.
-- Sector change: immediate geometry, 70–90 ms color/outline interpolation.
-- Pointer ray updates every repaint while the menu is open.
-- Reduced-motion mode removes expansion and interpolation while retaining selection feedback.
-- No infinite decorative animation.
+- Tactical Arc appears immediately with no timed opening animation.
+- Sector geometry and color change immediately with pointer or keyboard selection.
+- The pointer ray repaints only in response to input or normal application repaints; there is no self-scheduled animation loop.
+- No infinite decorative animation, spring physics, glow pulsing, or reduced-motion preference is required because the interaction contains no autonomous/timed motion.
 
 ## 8. Tests
 
 Focused unit tests cover:
 
 - Fan orientation at all four viewport edges.
-- Full geometry remains inside viewport bounds.
-- Angle-to-sector mapping and dead-zone behavior.
+- Full fan, label rail, and safe margin remain inside the treemap canvas, including mirrored and minimum-scale cases.
+- Angle/radius-to-sector mapping, gaps, hub dead zone, outside-fan behavior, and click-time re-hit-testing.
 - Keyboard cycling and direct numeric selection.
+- Keyboard opening, focus trap/restore, and handled-input consumption.
 - Aggregate tiles cannot emit file actions.
 - Action mapping preserves Reveal / Recycle / Permanent semantics.
+- ContextTarget validation fails on tab, snapshot, path, kind, root, rename, removal, and rescan changes.
 - Status-bar geometry centers the metric group vertically.
 - About links match the approved public URLs.
 
@@ -153,10 +172,11 @@ Runtime verification covers:
 
 - Right-click a real folder near the center and all four window edges.
 - Move between all sectors and verify the line follows the pointer.
-- Execute Explorer and Recycle; confirm Recycle has no extra dialog.
+- Execute Explorer and Recycle against a unique temporary test root created for this verification. Resolve both source and target paths and prove they remain inside that root before Recycle is enabled; otherwise abort the destructive check. Confirm Recycle has no extra dialog.
 - Enter permanent deletion and verify the existing confirmation still gates execution.
 - Dismiss with Escape, outside click, hub click, and repeated right-click.
 - Open About and verify every link is visible and clickable.
+- Verify About and its compact trigger at the minimum supported window width.
 - Inspect the bottom bar at common Windows scaling values.
 - Package, install, update the desktop shortcut, open the installed build, and capture visual evidence.
 
