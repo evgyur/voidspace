@@ -55,7 +55,18 @@ The scrim has no blur, gradient, texture, animation, or pointer behavior of its 
 
 ## 4. Side Target Plate
 
-Replace the existing 152×44-point detail rail with one edge-aware target plate opposite the sector fan. At scale `1.0`, the plate is 280×94 logical points with a 12-point gap from the fan. At compact scale `0.75`, all plate dimensions, padding, font sizes, and gap scale uniformly.
+Replace the existing 152×44-point detail rail with one edge-aware target plate opposite the sector fan. At scale `1.0`, the plate is 280×94 logical points with a 12-point horizontal gap from the fan. Its vertical center is exactly the hub center. At compact scale `0.75`, plate dimensions, padding, font sizes, row boxes, separator position, gap, and bloom width scale uniformly. The outer 8-point safe margin remains unscaled.
+
+The exact scale-1.0 plate layout is:
+
+- Left/right insets: 12 points.
+- Top/bottom insets: 10 points.
+- Tag line box: `y = 10..20`.
+- Identity line box: `y = 24..48`, with an 8-point horizontal gap between complete size and name.
+- Path line box: `y = 50..62`.
+- Separator: one point at `y = 68`.
+- Action line box: `y = 74..84`.
+- Remaining bottom inset: 10 points.
 
 The plate contains, in order:
 
@@ -64,9 +75,11 @@ The plate contains, in order:
 3. Absolute path — 9-point muted text, single line with middle ellipsis when necessary; hover exposes the complete path in a tooltip.
 4. Current full action label — 9-point semantic color below a separator, for example `DELETE WITHOUT RECOVERY`.
 
-The target name is the dominant line. It may truncate with a terminal ellipsis only after reserving space for the complete size. The plate background is opaque `#0B0F11`; border is `#3A4449`; no content relies on the dimmed treemap for identification.
+The target name is the dominant line. Layout measures actual galleys before painting. It first reserves the complete size plus the 8-point gap, then gives the remaining identity-row width to the name. Name and path truncation use Unicode extended grapheme clusters, never raw bytes or scalar-value slicing. A truncated name retains at least four leading grapheme clusters plus a terminal ellipsis; if four clusters cannot fit after the size reservation, geometry fitting must choose compact scale or fail closed rather than display an ambiguous identity. The single-line path uses measured middle ellipsis and preserves both the root/drive prefix and final component. The plate background is opaque `#0B0F11`; border is `#3A4449`; no content relies on the dimmed treemap for identification.
 
-The plate follows the existing fan orientation: right-facing fan places the plate to the left, left-facing fan places it to the right. Geometry fitting includes the plate, gap, maximum 5-point bloom, and 8-point safe margin. If full scale does not fit, the complete fan-plus-plate composition retries at scale `0.75`; if that also cannot fit, opening fails closed through the existing window-too-small behavior. The plate never overlaps the fan, leaves the work area, or changes sector hit bounds.
+The plate registers a stable focusable, non-interactive foreground response. Hover or keyboard focus opens the same full-identity tooltip containing untruncated size, name, and absolute path. The tooltip is informational: a primary click on the plate remains a neutral outside click and dismisses the menu without action. The full identity also remains in the accessibility description. `SELECT COMMAND` uses white `#FFFFFF` text and the neutral border `#3A4449`; semantic color appears only when a real action is visually selected.
+
+The plate follows the existing fan orientation: right-facing fan places the plate to the left, left-facing fan places it to the right. For scale `s`, the maximum bloom width is `5s`, the plate is centered vertically on the hub, and the combined pre-margin bounds are exactly `(2 × 106 + 12 + 280) × s` wide by `max(2 × 106, 94) × s` high. Geometry fitting then expands those bounds by the unscaled 8-point safe margin on every side. If full scale does not fit, the complete fan-plus-plate composition retries at scale `0.75`; if that also cannot fit, opening fails closed through the existing window-too-small behavior. Because `5s <= 5 < 8`, peak bloom stays inside the safe margin. The plate never overlaps the fan, leaves the work area, or changes sector hit bounds.
 
 The plate always describes the captured `ContextTarget`, while its bottom row follows pointer visual precedence and falls back to the keyboard-selected action or `SELECT COMMAND`. The permanent-delete row is informational only; executing it still uses the existing confirmation flow.
 
@@ -118,7 +131,7 @@ The Reactor Beat styling path must introduce no new per-frame heap allocation: t
 
 - The pulse supplements existing color, text, and focus cues; it is never the only indication of selection.
 - Accessible names, numeric shortcuts, focus order, and hit targets remain unchanged.
-- The menu's accessible summary includes target size, target name, full path, and the current full action label. The scrim is decorative and is excluded from the accessibility tree.
+- The plate owns one stable focusable foreground accessibility node with `WidgetType::Window` semantics and a stable ID derived from the menu instance, not the animation frame. Its description contains full size, full name, full path, and the logical current action. Pulse phase, label scale, and bloom intensity never enter that string, so Reactor Beat repaints do not repeatedly announce unchanged content. Pointer action changes update the current-action phrase once; exiting hover restores the keyboard action or `SELECT COMMAND` once. The plate participates once in the menu focus order, while the scrim is decorative and never enters the accessibility tree.
 - On Windows, motion preference is resolved from `SPI_GETCLIENTAREAANIMATION` when the Tactical Arc opens. A disabled setting or a failed query selects reduced motion. Reduced motion keeps the static fully opaque active fill, dark readable label, and bright baseline border, but fixes intensity at zero and schedules no animation repaint.
 - Recycle still executes immediately.
 - Permanent deletion still enters the existing confirmation flow.
@@ -136,9 +149,11 @@ Focused tests cover:
 - Autonomous repaint is requested only for pointer hover with full motion enabled.
 - Existing rendered-frame Tactical Arc labels remain inside the foreground clip.
 - Rendered baseline and both peak frames cover all three actions/colors, both fan orientations, and geometry scales `1.0` and `0.75`. They assert that scaled label bounds remain inside the corresponding sector and foreground clip, the maximum 5-point bloom remains inside the work area and does not paint across sector gaps, and hit-test results are identical to the static geometry.
-- Modal render tests assert one alpha-184 full-viewport black scrim below all Tactical Arc shapes and no scrim after dismissal.
+- Modal render tests assert one alpha-184 black scrim whose rectangle exactly equals the full egui content viewport—not the treemap work area—at multiple viewport sizes. Shape/layer assertions enforce `base UI < scrim and shield < tether < fan and hub < plate and identity tooltip`.
 - Side Target Plate geometry tests cover both orientations, both scales, all four work-area edges, long Unicode names, long absolute paths, and the minimum supported viewport. The full composition stays inside the work area without overlapping the fan.
-- Rendered plate tests assert that size remains complete, name is the dominant text, path middle-ellipsizes, full action label follows pointer precedence, and the hub contains `TARGET` plus `LOCKED` instead of the old small size/name.
+- Rendered plate tests assert the exact vertical anchor, insets, row boxes, separator, complete size, measured Unicode-safe name truncation with four retained grapheme clusters, measured path middle ellipsis, neutral `SELECT COMMAND` styling, pointer-precedence action label, focus/hover full-identity tooltip, and `TARGET / LOCKED` hub text.
+- Interaction tests prove the fan and plate remain focusable/interactive above the shield while representative top-bar, tab, treemap, inspector, and status pointer/keyboard events cannot fire. Escape, outside click, a primary neutral plate click, repeated right-click, action completion, and target invalidation each remove scrim plus shield in the same closing frame and restore focus according to the earlier Tactical Arc specification.
+- Accessibility tests keep the plate node ID stable across pulse frames, exclude scrim from focus order, preserve untruncated identity, and change the announced current-action description only when pointer or keyboard selection actually changes.
 
 Release verification runs formatting, Clippy with warnings denied, the full workspace tests, release packaging, local installation, desktop-shortcut refresh, and launch of the installed build.
 
