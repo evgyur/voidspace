@@ -425,11 +425,24 @@ fn geometry_for_area_painter(
     geometry
 }
 
+#[derive(Clone, Debug)]
 struct TargetPlateText {
     fitted_name: String,
     fitted_path: String,
     identity_font: FontId,
     small_font: FontId,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct TargetPlateTextCacheKey {
+    font: FontId,
+    geometry_scale_bits: u32,
+}
+
+#[derive(Clone, Debug)]
+struct TargetPlateTextCache {
+    key: TargetPlateTextCacheKey,
+    text: TargetPlateText,
 }
 
 fn scaled_font(font: &FontId, points: f32, scale: f32) -> FontId {
@@ -450,6 +463,9 @@ fn target_path_anchors(target: &ContextTarget, path: &str) -> Option<(String, St
     let prefix = target.root.to_string_lossy().into_owned();
     if !path.starts_with(&prefix) {
         return None;
+    }
+    if target.path == target.root {
+        return Some((prefix, String::new()));
     }
 
     let Some(final_component) = target.path.file_name() else {
@@ -534,6 +550,9 @@ pub struct TacticalArcState {
     pub geometry: TacticalArcGeometry,
     keyboard_index: Option<usize>,
     armed: bool,
+    target_plate_text_cache: Option<TargetPlateTextCache>,
+    #[cfg(test)]
+    target_plate_fit_count: usize,
 }
 
 impl TacticalArcState {
@@ -548,7 +567,39 @@ impl TacticalArcState {
             geometry: TacticalArcGeometry::fit(pointer, work_area, 1.0)?,
             keyboard_index: keyboard_open.then_some(0),
             armed: false,
+            target_plate_text_cache: None,
+            #[cfg(test)]
+            target_plate_fit_count: 0,
         })
+    }
+
+    fn prepare_target_plate_text(
+        &mut self,
+        painter: &egui::Painter,
+        plate: Rect,
+        geometry_scale: f32,
+        font: &FontId,
+    ) -> bool {
+        let key = TargetPlateTextCacheKey {
+            font: font.clone(),
+            geometry_scale_bits: geometry_scale.to_bits(),
+        };
+        if self
+            .target_plate_text_cache
+            .as_ref()
+            .is_some_and(|cached| cached.key == key)
+        {
+            return true;
+        }
+
+        #[cfg(test)]
+        {
+            self.target_plate_fit_count += 1;
+        }
+        self.target_plate_text_cache =
+            fit_target_plate_text(painter, &self.target, plate, geometry_scale, font)
+                .map(|text| TargetPlateTextCache { key, text });
+        self.target_plate_text_cache.is_some()
     }
 
     pub fn show(&mut self, context: &egui::Context, font: FontId) -> Option<TacticalArcOutcome> {
@@ -686,16 +737,15 @@ impl TacticalArcState {
                     painter.line_segment([center, pointer], Stroke::new(1.5, hud::CYAN));
                 }
                 let plate = draw_geometry.target_plate_rect();
-                let Some(plate_text) = fit_target_plate_text(
-                    &painter,
-                    &self.target,
-                    plate,
-                    draw_geometry.scale,
-                    &font,
-                ) else {
+                if !self.prepare_target_plate_text(&painter, plate, draw_geometry.scale, &font) {
                     plate_text_fit_failed = true;
                     return;
-                };
+                }
+                let plate_text = &self
+                    .target_plate_text_cache
+                    .as_ref()
+                    .expect("successful target-plate fit must be cached")
+                    .text;
                 painter.rect_filled(plate, 0.0, TARGET_PLATE_BACKGROUND);
                 painter.rect_stroke(
                     plate,
@@ -737,7 +787,7 @@ impl TacticalArcState {
                         identity_y,
                     ),
                     Align2::LEFT_CENTER,
-                    plate_text.fitted_name,
+                    &plate_text.fitted_name,
                     plate_text.identity_font.clone(),
                     Color32::WHITE,
                 );
@@ -747,7 +797,7 @@ impl TacticalArcState {
                         plate.top() + TARGET_PLATE_PATH_CENTER_Y * draw_geometry.scale,
                     ),
                     Align2::LEFT_CENTER,
-                    plate_text.fitted_path,
+                    &plate_text.fitted_path,
                     plate_text.small_font.clone(),
                     TARGET_PLATE_MUTED,
                 );
@@ -766,7 +816,7 @@ impl TacticalArcState {
                     ),
                     Align2::LEFT_CENTER,
                     selected.map_or("SELECT COMMAND", |sector| sector.action.label()),
-                    plate_text.small_font,
+                    plate_text.small_font.clone(),
                     selected.map_or(Color32::WHITE, |sector| sector.color),
                 );
                 let plate_response = ui.interact(
@@ -1157,6 +1207,19 @@ mod tests {
     }
 
     #[test]
+    fn target_path_anchors_do_not_overlap_when_target_is_named_scan_root() {
+        for path in [r"C:\Users\Chip", r"\\server\share"] {
+            let target = target_fixture("9.7 GB", "root", path, path);
+
+            assert_eq!(
+                target_path_anchors(&target, path),
+                Some((path.to_owned(), String::new())),
+                "root-equal target {path:?} must preserve the complete root only once"
+            );
+        }
+    }
+
+    #[test]
     fn center_gaps_and_outer_dead_zones_do_not_activate_actions() {
         let arc = TacticalArcGeometry::new(Pos2::new(200.0, 200.0), 42.0, 106.0);
         assert_eq!(arc.hit_test(Pos2::new(200.0, 200.0)), None);
@@ -1540,6 +1603,148 @@ mod tests {
 
         output.textures_delta.clear();
         assert_eq!(outcome, Some(TacticalArcOutcome::Dismiss));
+    }
+
+    #[test]
+    fn named_directory_and_unc_scan_roots_render_with_full_tooltip_and_accessibility() {
+        for (path, display_name) in [(r"C:\Users\Chip", "Chip"), (r"\\server\share", "share")] {
+            let context = egui::Context::default();
+            context.enable_accesskit();
+            let work_area = Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 720.0));
+            let target = target_fixture("9.7 GB", display_name, path, path);
+            let mut arc = TacticalArcState::new(target, Pos2::new(320.0, 360.0), work_area, false)
+                .expect("root target plate geometry fits");
+            let input = egui::RawInput {
+                screen_rect: Some(work_area),
+                ..Default::default()
+            };
+            let mut first_outcome = None;
+            let mut first_output = context.run_ui(input.clone(), |ui| {
+                first_outcome = arc.show(ui.ctx(), FontId::monospace(9.0));
+            });
+            let plate_node_id = first_output
+                .platform_output
+                .accesskit_update
+                .as_ref()
+                .and_then(|update| {
+                    update.nodes.iter().find_map(|(id, node)| {
+                        (node.role() == egui::accesskit::Role::Window
+                            && node.label().is_some_and(|label| label.contains(path)))
+                        .then_some(*id)
+                    })
+                });
+            first_output.textures_delta.clear();
+            assert_eq!(first_outcome, None, "root target {path:?} was dismissed");
+            let plate_node_id = plate_node_id
+                .expect("root plate exposes a stable Window node that can receive focus");
+
+            let mut outcome = None;
+            let focused_input = egui::RawInput {
+                screen_rect: Some(work_area),
+                events: vec![egui::Event::AccessKitActionRequest(
+                    egui::accesskit::ActionRequest {
+                        action: egui::accesskit::Action::Focus,
+                        target_tree: egui::accesskit::TreeId::ROOT,
+                        target_node: plate_node_id,
+                        data: None,
+                    },
+                )],
+                ..Default::default()
+            };
+            let mut focus_output = context.run_ui(focused_input, |ui| {
+                outcome = arc.show(ui.ctx(), FontId::monospace(9.0));
+            });
+            focus_output.textures_delta.clear();
+            assert_eq!(outcome, None, "focused root target {path:?} was dismissed");
+
+            let mut output = context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(work_area),
+                    ..Default::default()
+                },
+                |ui| {
+                    outcome = arc.show(ui.ctx(), FontId::monospace(9.0));
+                },
+            );
+            let rendered = rendered_text_shapes(&output)
+                .iter()
+                .map(|shape| shape.galley.text().to_owned())
+                .collect::<Vec<_>>();
+            let accessibility = output
+                .platform_output
+                .accesskit_update
+                .as_ref()
+                .and_then(|update| {
+                    update.nodes.iter().map(|(_, node)| node).find(|node| {
+                        node.role() == egui::accesskit::Role::Window
+                            && node.label().is_some_and(|label| label.contains(path))
+                    })
+                })
+                .map(|node| {
+                    (
+                        node.label()
+                            .expect("matched root plate has an accessible description")
+                            .to_owned(),
+                        node.supports_action(egui::accesskit::Action::Focus),
+                        node.supports_action(egui::accesskit::Action::Click),
+                    )
+                });
+            output.textures_delta.clear();
+
+            assert_eq!(outcome, None, "root target {path:?} was dismissed");
+            let path_occurrences = rendered.iter().filter(|text| text.as_str() == path).count();
+            assert!(
+                path_occurrences >= 2,
+                "expected full root {path:?} in both plate and focused tooltip, got {path_occurrences}"
+            );
+            let (description, supports_focus, supports_click) =
+                accessibility.expect("root plate keeps a labeled Window accessibility node");
+            for expected in ["9.7 GB", display_name, path, "SELECT COMMAND"] {
+                assert!(
+                    description.contains(expected),
+                    "description omitted {expected:?}: {description:?}"
+                );
+            }
+            assert!(supports_focus);
+            assert!(!supports_click);
+        }
+    }
+
+    #[test]
+    fn target_plate_fit_cache_reuses_and_invalidates_by_font_and_geometry_scale() {
+        let context = egui::Context::default();
+        let work_area = Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 720.0));
+        let target = target_fixture("9.7 GB", "archive", r"C:\Data\archive", r"C:\");
+        let mut arc = TacticalArcState::new(target, Pos2::new(320.0, 360.0), work_area, false)
+            .expect("target plate fits");
+        let input = egui::RawInput {
+            screen_rect: Some(work_area),
+            ..Default::default()
+        };
+
+        for font in [FontId::monospace(9.0), FontId::monospace(9.0)] {
+            let mut output = context.run_ui(input.clone(), |ui| {
+                arc.show(ui.ctx(), font.clone());
+            });
+            output.textures_delta.clear();
+        }
+        assert_eq!(arc.target_plate_fit_count, 1, "same key must reuse fit");
+
+        let mut font_output = context.run_ui(input.clone(), |ui| {
+            arc.show(ui.ctx(), FontId::proportional(9.0));
+        });
+        font_output.textures_delta.clear();
+        assert_eq!(arc.target_plate_fit_count, 2, "font change must refit");
+
+        arc.geometry.scale = COMPACT_SCALE;
+        let mut scale_output = context.run_ui(input, |ui| {
+            arc.show(ui.ctx(), FontId::proportional(9.0));
+        });
+        scale_output.textures_delta.clear();
+        assert_eq!(
+            arc.target_plate_fit_count, 3,
+            "geometry scale change must refit"
+        );
     }
 
     #[test]
