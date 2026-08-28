@@ -1,4 +1,4 @@
-use std::{f32::consts::PI, path::PathBuf};
+use std::{f32::consts::PI, path::PathBuf, time::Duration};
 
 use egui::{Align2, Color32, FontId, Galley, Id, Key, Pos2, Rect, Sense, Shape, Stroke, Vec2};
 use voidspace_model::{FileIdentity, NodeId, NodeKind, ScanId};
@@ -25,6 +25,7 @@ const SAFE_MARGIN: f32 = 8.0;
 const TARGET_PLATE_BACKGROUND: Color32 = Color32::from_rgb(0x0b, 0x0f, 0x11);
 const TARGET_PLATE_BORDER: Color32 = Color32::from_rgb(0x3a, 0x44, 0x49);
 const TARGET_PLATE_MUTED: Color32 = Color32::from_rgb(0x8e, 0x94, 0x9d);
+const MODAL_SCRIM: Color32 = Color32::from_black_alpha(184);
 
 mod primitives {
     use egui::{Color32, Stroke};
@@ -556,11 +557,49 @@ fn target_plate_description(target: &ContextTarget, action: Option<&SectorSpec>)
     )
 }
 
+#[cfg(windows)]
+fn client_area_animation_enabled() -> Option<bool> {
+    use windows::{
+        Win32::UI::WindowsAndMessaging::{
+            SPI_GETCLIENTAREAANIMATION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW,
+        },
+        core::BOOL,
+    };
+
+    let mut enabled = BOOL::default();
+    // SAFETY: SPI_GETCLIENTAREAANIMATION writes a BOOL to the valid stack pointer supplied here.
+    unsafe {
+        SystemParametersInfoW(
+            SPI_GETCLIENTAREAANIMATION,
+            0,
+            Some((&raw mut enabled).cast()),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+        .ok()?;
+    }
+    Some(enabled.as_bool())
+}
+
+#[cfg(not(windows))]
+fn client_area_animation_enabled() -> Option<bool> {
+    None
+}
+
+fn animation_repaint_after(
+    motion_enabled: bool,
+    pointer_hovered_action: Option<TacticalAction>,
+) -> Option<Duration> {
+    (motion_enabled && pointer_hovered_action.is_some()).then(|| Duration::from_millis(16))
+}
+
 #[derive(Clone, Debug)]
 pub struct TacticalArcState {
     pub target: ContextTarget,
     pub geometry: TacticalArcGeometry,
     keyboard_index: Option<usize>,
+    pointer_hovered_action: Option<TacticalAction>,
+    pointer_beat_started_at: Option<f64>,
+    motion_enabled: bool,
     armed: bool,
     target_plate_text_cache: Option<TargetPlateTextCache>,
     #[cfg(test)]
@@ -574,14 +613,61 @@ impl TacticalArcState {
         work_area: Rect,
         keyboard_open: bool,
     ) -> Option<Self> {
+        Self::new_with_motion_query_impl(
+            target,
+            pointer,
+            work_area,
+            keyboard_open,
+            client_area_animation_enabled,
+        )
+    }
+
+    #[cfg(test)]
+    fn new_with_motion_query(
+        target: ContextTarget,
+        pointer: Pos2,
+        work_area: Rect,
+        keyboard_open: bool,
+        query: impl FnOnce() -> Option<bool>,
+    ) -> Option<Self> {
+        Self::new_with_motion_query_impl(target, pointer, work_area, keyboard_open, query)
+    }
+
+    fn new_with_motion_query_impl(
+        target: ContextTarget,
+        pointer: Pos2,
+        work_area: Rect,
+        keyboard_open: bool,
+        query: impl FnOnce() -> Option<bool>,
+    ) -> Option<Self> {
+        let geometry = TacticalArcGeometry::fit(pointer, work_area, 1.0)?;
         Some(Self {
             target,
-            geometry: TacticalArcGeometry::fit(pointer, work_area, 1.0)?,
+            geometry,
             keyboard_index: keyboard_open.then_some(0),
+            pointer_hovered_action: None,
+            pointer_beat_started_at: None,
+            motion_enabled: query().unwrap_or(false),
             armed: false,
             target_plate_text_cache: None,
             #[cfg(test)]
             target_plate_fit_count: 0,
+        })
+    }
+
+    fn update_pointer_hover(&mut self, hovered: Option<TacticalAction>, now: f64) {
+        if self.pointer_hovered_action == hovered {
+            return;
+        }
+        self.pointer_hovered_action = hovered;
+        self.pointer_beat_started_at = hovered.map(|_| now);
+    }
+
+    fn visual_active_action(&self) -> Option<TacticalAction> {
+        self.pointer_hovered_action.or_else(|| {
+            self.keyboard_index
+                .and_then(|index| SECTORS.get(index))
+                .map(|sector| sector.action)
         })
     }
 
@@ -618,252 +704,280 @@ impl TacticalArcState {
     pub fn show(&mut self, context: &egui::Context, font: FontId) -> Option<TacticalArcOutcome> {
         let mut chosen = None;
         let mut plate_text_fit_failed = false;
-        let ignore_opening_secondary_click = !self.armed;
+        let opening_frame = !self.armed;
         self.armed = true;
         let geometry = self.geometry;
-        let area_rect = geometry.bounds().expand(SAFE_MARGIN);
-        if geometry.origin.distance(geometry.center) > 2.0 {
-            context
-                .layer_painter(egui::LayerId::new(
-                    egui::Order::Foreground,
-                    Id::new("tactical-tether"),
-                ))
-                .line_segment(
-                    [geometry.origin, geometry.center],
-                    Stroke::new(1.0, hud::ORANGE),
-                );
+        let content_rect = context.content_rect();
+        let pointer = context.pointer_hover_pos();
+        let hovered = pointer.and_then(|position| geometry.hit_test(position));
+        let now = context.input(|input| input.time);
+        self.update_pointer_hover(hovered, now);
+        let visual_active_action = self.visual_active_action();
+        let pointer_beat_intensity = if self.motion_enabled && hovered.is_some() {
+            self.pointer_beat_started_at.map_or(0.0, |started_at| {
+                primitives::reactor_beat((now - started_at) as f32)
+            })
+        } else {
+            0.0
+        };
+        if let Some(delay) = animation_repaint_after(self.motion_enabled, hovered) {
+            context.request_repaint_after(delay);
         }
-        egui::Area::new(Id::new("tactical-arc"))
-            .order(egui::Order::Foreground)
-            .fade_in(false)
-            .fixed_pos(area_rect.min)
-            .show(context, |ui| {
-                ui.set_min_size(area_rect.size());
-                let (rect, _) = ui.allocate_exact_size(area_rect.size(), Sense::hover());
-                let painter = ui.painter_at(rect);
-                let draw_geometry = geometry_for_area_painter(geometry, rect);
-                let center = draw_geometry.center;
-                let pointer = ui.ctx().pointer_hover_pos();
-                let hovered = pointer.and_then(|position| geometry.hit_test(position));
-
-                for (index, sector) in SECTORS.iter().enumerate() {
-                    let active = hovered == Some(sector.action)
-                        || (hovered.is_none() && self.keyboard_index == Some(index));
-                    let angle = draw_geometry.action_angle(index);
-                    let mut outer_points = Vec::with_capacity(13);
-                    let mut inner_points = Vec::with_capacity(13);
-                    for step in 0..=12 {
-                        let fraction = step as f32 / 12.0;
-                        let sample = angle - SECTOR_HALF_ANGLE + SECTOR_HALF_ANGLE * 2.0 * fraction;
-                        outer_points.push(
-                            center + Vec2::angled(sample) * (OUTER_RADIUS * draw_geometry.scale),
-                        );
-                        inner_points.push(
-                            center + Vec2::angled(sample) * (INNER_RADIUS * draw_geometry.scale),
-                        );
-                    }
-                    let fill = if active {
-                        Color32::from_rgba_unmultiplied(
-                            sector.color.r(),
-                            sector.color.g(),
-                            sector.color.b(),
-                            44,
-                        )
-                    } else {
-                        Color32::from_rgba_unmultiplied(11, 14, 16, 245)
-                    };
-                    let mut mesh = egui::Mesh::default();
-                    for step in 0..12 {
-                        let base = mesh.vertices.len() as u32;
-                        for point in [
-                            inner_points[step],
-                            outer_points[step],
-                            outer_points[step + 1],
-                            inner_points[step + 1],
-                        ] {
-                            mesh.colored_vertex(point, fill);
-                        }
-                        mesh.add_triangle(base, base + 1, base + 2);
-                        mesh.add_triangle(base, base + 2, base + 3);
-                    }
-                    painter.add(Shape::mesh(mesh));
-                    let sector_stroke = Stroke::new(if active { 2.0 } else { 1.0 }, sector.color);
-                    painter.add(Shape::line(outer_points.clone(), sector_stroke));
-                    painter.add(Shape::line(inner_points.clone(), sector_stroke));
-                    painter.line_segment([inner_points[0], outer_points[0]], sector_stroke);
-                    painter.line_segment([inner_points[12], outer_points[12]], sector_stroke);
-                    let action_center = draw_geometry.action_center(index);
-                    painter.text(
-                        action_center,
-                        Align2::CENTER_CENTER,
-                        format!("{}  {}", sector.shortcut, sector.short),
-                        font.clone(),
-                        sector.color,
-                    );
-                    let action_response = ui.interact(
-                        Rect::from_center_size(
-                            action_center,
-                            Vec2::splat(56.0 * draw_geometry.scale),
-                        ),
-                        Id::new("tactical-action").with(index),
-                        Sense::click(),
-                    );
-                    action_response.widget_info(|| {
-                        egui::WidgetInfo::labeled(
-                            egui::WidgetType::Button,
-                            true,
-                            format!(
-                                "{} · key {} to select · Enter to execute",
-                                sector.action.accessible_name(),
-                                sector.action.keyboard_hint()
-                            ),
-                        )
-                    });
-                }
-
-                painter.circle_filled(
-                    center,
-                    HUB_RADIUS * draw_geometry.scale,
-                    Color32::from_rgb(7, 9, 10),
-                );
-                painter.circle_stroke(
-                    center,
-                    HUB_RADIUS * draw_geometry.scale,
+        let modal_area = || {
+            egui::Area::new(Id::new("tactical-arc"))
+                .order(egui::Order::Foreground)
+                .sense(Sense::click())
+                .fade_in(false)
+                .fixed_pos(content_rect.min)
+        };
+        if opening_frame {
+            // An egui Area's implicit first sizing pass is non-interactive. Complete that
+            // invisible pass now so the visible modal Area shields this opening frame.
+            modal_area().sizing_pass(true).show(context, |ui| {
+                ui.set_min_size(content_rect.size());
+            });
+        }
+        modal_area().show(context, |ui| {
+            ui.set_min_size(content_rect.size());
+            let (rect, _) = ui.allocate_exact_size(content_rect.size(), Sense::click());
+            ui.set_clip_rect(content_rect);
+            let painter = ui.painter_at(rect);
+            let draw_geometry = geometry_for_area_painter(geometry, rect);
+            let center = draw_geometry.center;
+            painter.rect_filled(rect, 0.0, MODAL_SCRIM);
+            if draw_geometry.origin.distance(center) > 2.0 {
+                painter.line_segment(
+                    [draw_geometry.origin, center],
                     Stroke::new(1.0, hud::ORANGE),
                 );
-                painter.text(
-                    center + Vec2::new(0.0, -4.0),
-                    Align2::CENTER_BOTTOM,
-                    "TARGET",
-                    font.clone(),
-                    hud::ORANGE,
-                );
-                painter.text(
-                    center + Vec2::new(0.0, 4.0),
-                    Align2::CENTER_TOP,
-                    "LOCKED",
-                    font.clone(),
-                    Color32::WHITE,
-                );
+            }
+            if let Some(pointer) = pointer {
+                painter.line_segment([center, pointer], Stroke::new(1.5, hud::CYAN));
+            }
 
-                if let Some(pointer) = pointer {
-                    painter.line_segment([center, pointer], Stroke::new(1.5, hud::CYAN));
+            for (index, sector) in SECTORS.iter().enumerate() {
+                let active = visual_active_action == Some(sector.action);
+                let angle = draw_geometry.action_angle(index);
+                let mut outer_points = Vec::with_capacity(13);
+                let mut inner_points = Vec::with_capacity(13);
+                for step in 0..=12 {
+                    let fraction = step as f32 / 12.0;
+                    let sample = angle - SECTOR_HALF_ANGLE + SECTOR_HALF_ANGLE * 2.0 * fraction;
+                    outer_points
+                        .push(center + Vec2::angled(sample) * (OUTER_RADIUS * draw_geometry.scale));
+                    inner_points
+                        .push(center + Vec2::angled(sample) * (INNER_RADIUS * draw_geometry.scale));
                 }
-                let plate = draw_geometry.target_plate_rect();
-                if !self.prepare_target_plate_text(&painter, plate, draw_geometry.scale, &font) {
-                    plate_text_fit_failed = true;
-                    return;
-                }
-                let plate_text = &self
-                    .target_plate_text_cache
-                    .as_ref()
-                    .expect("successful target-plate fit must be cached")
-                    .text;
-                painter.rect_filled(plate, 0.0, TARGET_PLATE_BACKGROUND);
-                painter.rect_stroke(
-                    plate,
-                    0.0,
-                    Stroke::new(draw_geometry.scale, TARGET_PLATE_BORDER),
-                    egui::StrokeKind::Inside,
-                );
-                let selected = hovered
-                    .map(TacticalAction::index)
-                    .or(self.keyboard_index)
-                    .and_then(|index| SECTORS.get(index));
-                let inset = TARGET_PLATE_INSET * draw_geometry.scale;
-                let text_x = plate.left() + inset;
-                painter.text(
-                    Pos2::new(
-                        text_x,
-                        plate.top() + TARGET_PLATE_TAG_CENTER_Y * draw_geometry.scale,
-                    ),
-                    Align2::LEFT_CENTER,
-                    TARGET_PLATE_TAG,
-                    plate_text.fonts.tag.clone(),
-                    hud::ORANGE,
-                );
-                let identity_y = plate.top() + TARGET_PLATE_IDENTITY_CENTER_Y * draw_geometry.scale;
-                let size_galley = painter.layout_no_wrap(
-                    self.target.display_size.clone(),
-                    plate_text.fonts.size.clone(),
-                    hud::ORANGE,
-                );
-                let size_width = size_galley.size().x;
-                let name_galley = painter.layout_no_wrap(
-                    plate_text.fitted_name.clone(),
-                    plate_text.fonts.name.clone(),
-                    Color32::WHITE,
-                );
-                let name_y = identity_y - name_galley.size().y * 0.5;
-                let identity_baseline = name_y + galley_baseline(&name_galley);
-                let size_y = identity_baseline - galley_baseline(&size_galley);
-                painter.galley(Pos2::new(text_x, size_y), size_galley, hud::ORANGE);
-                painter.galley(
-                    Pos2::new(
-                        text_x + size_width + TARGET_PLATE_IDENTITY_GAP * draw_geometry.scale,
-                        name_y,
-                    ),
-                    name_galley,
-                    Color32::WHITE,
-                );
-                painter.text(
-                    Pos2::new(
-                        text_x,
-                        plate.top() + TARGET_PLATE_PATH_CENTER_Y * draw_geometry.scale,
-                    ),
-                    Align2::LEFT_CENTER,
-                    &plate_text.fitted_path,
-                    plate_text.fonts.small.clone(),
-                    TARGET_PLATE_MUTED,
-                );
-                let separator_y = plate.top() + TARGET_PLATE_SEPARATOR_Y * draw_geometry.scale;
-                painter.line_segment(
-                    [
-                        Pos2::new(text_x, separator_y),
-                        Pos2::new(plate.right() - inset, separator_y),
-                    ],
-                    Stroke::new(draw_geometry.scale, TARGET_PLATE_BORDER),
-                );
-                painter.text(
-                    Pos2::new(
-                        text_x,
-                        plate.top() + TARGET_PLATE_ACTION_CENTER_Y * draw_geometry.scale,
-                    ),
-                    Align2::LEFT_CENTER,
-                    selected.map_or("SELECT COMMAND", |sector| sector.action.label()),
-                    plate_text.fonts.small.clone(),
-                    selected.map_or(Color32::WHITE, |sector| sector.color),
-                );
-                let plate_response = ui.interact(
-                    plate,
-                    target_plate_response_id(&self.target),
-                    Sense::focusable_noninteractive(),
-                );
-                let description = target_plate_description(&self.target, selected);
-                plate_response.widget_info(|| {
-                    egui::WidgetInfo::labeled(egui::WidgetType::Window, true, &description)
+                let active_style = active.then(|| {
+                    let intensity = if hovered == Some(sector.action) {
+                        pointer_beat_intensity
+                    } else {
+                        0.0
+                    };
+                    primitives::active_sector_style(sector.color, intensity, draw_geometry.scale)
                 });
-                if plate_response.hovered() || plate_response.has_focus() {
-                    egui::Tooltip::always_open(
-                        ui.ctx().clone(),
-                        plate_response.layer_id,
-                        plate_response.id,
-                        plate_response.rect,
-                    )
-                    .show(|ui| {
-                        ui.label(&self.target.display_size);
-                        ui.label(&self.target.display_name);
-                        ui.label(self.target.path.display().to_string());
-                        ui.label(selected.map_or("SELECT COMMAND", |sector| sector.action.label()));
-                    });
+                let fill = if let Some(style) = active_style {
+                    style.fill
+                } else {
+                    Color32::from_rgba_unmultiplied(11, 14, 16, 245)
+                };
+                let mut mesh = egui::Mesh::default();
+                for step in 0..12 {
+                    let base = mesh.vertices.len() as u32;
+                    for point in [
+                        inner_points[step],
+                        outer_points[step],
+                        outer_points[step + 1],
+                        inner_points[step + 1],
+                    ] {
+                        mesh.colored_vertex(point, fill);
+                    }
+                    mesh.add_triangle(base, base + 1, base + 2);
+                    mesh.add_triangle(base, base + 2, base + 3);
                 }
+                painter.add(Shape::mesh(mesh));
+                let mut boundary = outer_points;
+                boundary.extend(inner_points.into_iter().rev());
+                if let Some(style) = active_style {
+                    painter.add(Shape::closed_line(boundary.clone(), style.outer_bloom));
+                    painter.add(Shape::closed_line(boundary, style.inner_stroke));
+                } else {
+                    painter.add(Shape::closed_line(boundary, Stroke::new(1.0, sector.color)));
+                }
+                let action_center = draw_geometry.action_center(index);
+                let (label_font, label_color) = active_style.map_or_else(
+                    || (font.clone(), sector.color),
+                    |style| {
+                        (
+                            FontId::new(font.size * style.label_scale, font.family.clone()),
+                            style.label_color,
+                        )
+                    },
+                );
+                painter.text(
+                    action_center,
+                    Align2::CENTER_CENTER,
+                    format!("{}  {}", sector.shortcut, sector.short),
+                    label_font,
+                    label_color,
+                );
+                let action_response = ui.interact(
+                    Rect::from_center_size(action_center, Vec2::splat(56.0 * draw_geometry.scale)),
+                    Id::new("tactical-action").with(index),
+                    Sense::click(),
+                );
+                action_response.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::WidgetType::Button,
+                        true,
+                        format!(
+                            "{} · key {} to select · Enter to execute",
+                            sector.action.accessible_name(),
+                            sector.action.keyboard_hint()
+                        ),
+                    )
+                });
+            }
+
+            painter.circle_filled(
+                center,
+                HUB_RADIUS * draw_geometry.scale,
+                Color32::from_rgb(7, 9, 10),
+            );
+            painter.circle_stroke(
+                center,
+                HUB_RADIUS * draw_geometry.scale,
+                Stroke::new(1.0, hud::ORANGE),
+            );
+            painter.text(
+                center + Vec2::new(0.0, -4.0),
+                Align2::CENTER_BOTTOM,
+                "TARGET",
+                font.clone(),
+                hud::ORANGE,
+            );
+            painter.text(
+                center + Vec2::new(0.0, 4.0),
+                Align2::CENTER_TOP,
+                "LOCKED",
+                font.clone(),
+                Color32::WHITE,
+            );
+
+            let plate = draw_geometry.target_plate_rect();
+            if !self.prepare_target_plate_text(&painter, plate, draw_geometry.scale, &font) {
+                plate_text_fit_failed = true;
+                return;
+            }
+            let plate_text = &self
+                .target_plate_text_cache
+                .as_ref()
+                .expect("successful target-plate fit must be cached")
+                .text;
+            painter.rect_filled(plate, 0.0, TARGET_PLATE_BACKGROUND);
+            painter.rect_stroke(
+                plate,
+                0.0,
+                Stroke::new(draw_geometry.scale, TARGET_PLATE_BORDER),
+                egui::StrokeKind::Inside,
+            );
+            let selected = visual_active_action
+                .map(TacticalAction::index)
+                .and_then(|index| SECTORS.get(index));
+            let inset = TARGET_PLATE_INSET * draw_geometry.scale;
+            let text_x = plate.left() + inset;
+            painter.text(
+                Pos2::new(
+                    text_x,
+                    plate.top() + TARGET_PLATE_TAG_CENTER_Y * draw_geometry.scale,
+                ),
+                Align2::LEFT_CENTER,
+                TARGET_PLATE_TAG,
+                plate_text.fonts.tag.clone(),
+                hud::ORANGE,
+            );
+            let identity_y = plate.top() + TARGET_PLATE_IDENTITY_CENTER_Y * draw_geometry.scale;
+            let size_galley = painter.layout_no_wrap(
+                self.target.display_size.clone(),
+                plate_text.fonts.size.clone(),
+                hud::ORANGE,
+            );
+            let size_width = size_galley.size().x;
+            let name_galley = painter.layout_no_wrap(
+                plate_text.fitted_name.clone(),
+                plate_text.fonts.name.clone(),
+                Color32::WHITE,
+            );
+            let name_y = identity_y - name_galley.size().y * 0.5;
+            let identity_baseline = name_y + galley_baseline(&name_galley);
+            let size_y = identity_baseline - galley_baseline(&size_galley);
+            painter.galley(Pos2::new(text_x, size_y), size_galley, hud::ORANGE);
+            painter.galley(
+                Pos2::new(
+                    text_x + size_width + TARGET_PLATE_IDENTITY_GAP * draw_geometry.scale,
+                    name_y,
+                ),
+                name_galley,
+                Color32::WHITE,
+            );
+            painter.text(
+                Pos2::new(
+                    text_x,
+                    plate.top() + TARGET_PLATE_PATH_CENTER_Y * draw_geometry.scale,
+                ),
+                Align2::LEFT_CENTER,
+                &plate_text.fitted_path,
+                plate_text.fonts.small.clone(),
+                TARGET_PLATE_MUTED,
+            );
+            let separator_y = plate.top() + TARGET_PLATE_SEPARATOR_Y * draw_geometry.scale;
+            painter.line_segment(
+                [
+                    Pos2::new(text_x, separator_y),
+                    Pos2::new(plate.right() - inset, separator_y),
+                ],
+                Stroke::new(draw_geometry.scale, TARGET_PLATE_BORDER),
+            );
+            painter.text(
+                Pos2::new(
+                    text_x,
+                    plate.top() + TARGET_PLATE_ACTION_CENTER_Y * draw_geometry.scale,
+                ),
+                Align2::LEFT_CENTER,
+                selected.map_or("SELECT COMMAND", |sector| sector.action.label()),
+                plate_text.fonts.small.clone(),
+                selected.map_or(Color32::WHITE, |sector| sector.color),
+            );
+            let plate_response = ui.interact(
+                plate,
+                target_plate_response_id(&self.target),
+                Sense::focusable_noninteractive(),
+            );
+            let description = target_plate_description(&self.target, selected);
+            plate_response.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Window, true, &description)
             });
+            if plate_response.hovered() || plate_response.has_focus() {
+                egui::Tooltip::always_open(
+                    ui.ctx().clone(),
+                    plate_response.layer_id,
+                    plate_response.id,
+                    plate_response.rect,
+                )
+                .show(|ui| {
+                    ui.label(&self.target.display_size);
+                    ui.label(&self.target.display_name);
+                    ui.label(self.target.path.display().to_string());
+                    ui.label(selected.map_or("SELECT COMMAND", |sector| sector.action.label()));
+                });
+            }
+        });
         if plate_text_fit_failed {
             return Some(TacticalArcOutcome::Dismiss);
         }
 
         context.input_mut(|input| {
-            if input.pointer.secondary_clicked() && !ignore_opening_secondary_click {
+            if input.pointer.secondary_clicked() && !opening_frame {
                 chosen = Some(TacticalArcOutcome::Dismiss);
             }
             if input.pointer.primary_clicked()
@@ -1029,6 +1143,89 @@ mod tests {
         let lighter = first.max(second);
         let darker = first.min(second);
         (lighter + 0.05) / (darker + 0.05)
+    }
+
+    fn arc_with_motion_query(
+        query: impl FnOnce() -> Option<bool>,
+        keyboard_open: bool,
+    ) -> TacticalArcState {
+        TacticalArcState::new_with_motion_query(
+            target_fixture("9.7 GB", "archive", r"C:\Data\archive", r"C:\"),
+            Pos2::new(320.0, 360.0),
+            Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 720.0)),
+            keyboard_open,
+            query,
+        )
+        .expect("test work area fits tactical arc")
+    }
+
+    #[test]
+    fn hover_change_restarts_reactor_beat_but_same_action_does_not() {
+        let mut arc = arc_with_motion_query(|| Some(true), true);
+
+        arc.update_pointer_hover(Some(TacticalAction::Recycle), 10.0);
+        assert_eq!(arc.pointer_beat_started_at, Some(10.0));
+        arc.update_pointer_hover(Some(TacticalAction::Recycle), 20.0);
+        assert_eq!(arc.pointer_beat_started_at, Some(10.0));
+
+        arc.update_pointer_hover(Some(TacticalAction::DeletePermanently), 30.0);
+        assert_eq!(arc.pointer_beat_started_at, Some(30.0));
+    }
+
+    #[test]
+    fn pointer_visual_precedes_keyboard_then_hover_exit_restores_keyboard() {
+        let mut arc = arc_with_motion_query(|| Some(true), true);
+        assert_eq!(
+            arc.visual_active_action(),
+            Some(TacticalAction::OpenInExplorer)
+        );
+
+        arc.update_pointer_hover(Some(TacticalAction::Recycle), 10.0);
+        assert_eq!(arc.visual_active_action(), Some(TacticalAction::Recycle));
+        assert_eq!(
+            arc.keyboard_index,
+            Some(0),
+            "hover must not move Enter target"
+        );
+
+        arc.update_pointer_hover(None, 20.0);
+        assert_eq!(arc.pointer_beat_started_at, None);
+        assert_eq!(
+            arc.visual_active_action(),
+            Some(TacticalAction::OpenInExplorer)
+        );
+        assert_eq!(arc.keyboard_index, Some(0));
+    }
+
+    #[test]
+    fn client_animation_query_runs_once_and_fails_closed() {
+        let query_count = Cell::new(0);
+        let enabled = arc_with_motion_query(
+            || {
+                query_count.set(query_count.get() + 1);
+                Some(true)
+            },
+            false,
+        );
+        assert!(enabled.motion_enabled);
+        assert_eq!(query_count.get(), 1);
+
+        assert!(!arc_with_motion_query(|| Some(false), false).motion_enabled);
+        assert!(!arc_with_motion_query(|| None, false).motion_enabled);
+    }
+
+    #[test]
+    fn animation_repaint_policy_requires_enabled_pointer_hover() {
+        assert_eq!(
+            animation_repaint_after(true, Some(TacticalAction::Recycle)),
+            Some(std::time::Duration::from_millis(16))
+        );
+        assert_eq!(
+            animation_repaint_after(false, Some(TacticalAction::Recycle)),
+            None
+        );
+        assert_eq!(animation_repaint_after(true, None), None);
+        assert_eq!(animation_repaint_after(false, None), None);
     }
 
     #[test]
@@ -2075,5 +2272,415 @@ mod tests {
 
         output.textures_delta.clear();
         assert_eq!(visible_labels, 10);
+    }
+
+    fn collect_leaf_shapes<'a>(shape: &'a Shape, found: &mut Vec<&'a Shape>) {
+        match shape {
+            Shape::Vec(shapes) => {
+                for shape in shapes {
+                    collect_leaf_shapes(shape, found);
+                }
+            }
+            shape => found.push(shape),
+        }
+    }
+
+    fn leaf_shapes(output: &egui::FullOutput) -> Vec<&Shape> {
+        let mut found = Vec::new();
+        for clipped in &output.shapes {
+            collect_leaf_shapes(&clipped.shape, &mut found);
+        }
+        found
+    }
+
+    fn raw_input(viewport: Rect, time: f64, pointer: Option<Pos2>) -> egui::RawInput {
+        let mut input = egui::RawInput {
+            screen_rect: Some(viewport),
+            time: Some(time),
+            predicted_dt: 0.0,
+            ..Default::default()
+        };
+        if let Some(pointer) = pointer {
+            input.events.push(egui::Event::PointerMoved(pointer));
+        }
+        input
+    }
+
+    #[test]
+    fn exactly_one_alpha_184_scrim_covers_each_full_content_viewport() {
+        let scrim = Color32::from_rgba_unmultiplied(0, 0, 0, 184);
+        for viewport in [
+            Rect::from_min_size(Pos2::ZERO, Vec2::new(640.0, 480.0)),
+            Rect::from_min_size(Pos2::new(17.0, 29.0), Vec2::new(1280.0, 720.0)),
+        ] {
+            let context = egui::Context::default();
+            let target = target_fixture("9.7 GB", "archive", r"C:\Data\archive", r"C:\");
+            let mut arc = TacticalArcState::new_with_motion_query(
+                target,
+                viewport.center(),
+                viewport,
+                false,
+                || Some(false),
+            )
+            .expect("test viewport fits tactical arc");
+            let mut content_rect = Rect::NOTHING;
+            let mut output = context.run_ui(raw_input(viewport, 1.0, None), |ui| {
+                content_rect = ui.ctx().content_rect();
+                arc.show(ui.ctx(), FontId::monospace(9.0));
+            });
+
+            let matching = leaf_shapes(&output)
+                .into_iter()
+                .filter_map(|shape| match shape {
+                    Shape::Rect(rect) if rect.fill == scrim => Some(rect.rect),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            output.textures_delta.clear();
+            assert_eq!(matching, vec![content_rect]);
+            assert_eq!(content_rect, viewport);
+        }
+    }
+
+    #[test]
+    fn modal_shapes_follow_base_scrim_tether_fan_hub_plate_order_and_stay_contained() {
+        let context = egui::Context::default();
+        let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 720.0));
+        let target = target_fixture("9.7 GB", "archive", r"C:\Data\archive", r"C:\");
+        let mut arc = TacticalArcState::new_with_motion_query(
+            target,
+            Pos2::new(24.0, 360.0),
+            viewport,
+            false,
+            || Some(false),
+        )
+        .expect("test viewport fits tactical arc");
+        assert!(arc.geometry.origin.distance(arc.geometry.center) > 2.0);
+        let plate = arc.geometry.target_plate_rect();
+        let origin = arc.geometry.origin;
+        let center = arc.geometry.center;
+        let base_color = Color32::from_rgb(0x51, 0x52, 0x53);
+        let scrim = Color32::from_rgba_unmultiplied(0, 0, 0, 184);
+        let mut warm_up = context.run_ui(raw_input(viewport, 0.0, None), |ui| {
+            arc.show(ui.ctx(), FontId::monospace(9.0));
+        });
+        warm_up.textures_delta.clear();
+        let mut output = context.run_ui(raw_input(viewport, 1.0, None), |ui| {
+            ui.painter().rect_filled(
+                Rect::from_min_size(Pos2::new(2.0, 2.0), Vec2::splat(4.0)),
+                0.0,
+                base_color,
+            );
+            arc.show(ui.ctx(), FontId::monospace(9.0));
+        });
+        let shapes = leaf_shapes(&output);
+        let index_of = |predicate: &dyn Fn(&Shape) -> bool| {
+            shapes
+                .iter()
+                .position(|shape| predicate(shape))
+                .expect("expected rendered shape")
+        };
+        let base_index =
+            index_of(&|shape| matches!(shape, Shape::Rect(rect) if rect.fill == base_color));
+        let scrim_index = index_of(
+            &|shape| matches!(shape, Shape::Rect(rect) if rect.fill == scrim && rect.rect == viewport),
+        );
+        let tether_index = index_of(&|shape| {
+            matches!(shape, Shape::LineSegment { points, stroke }
+                if *points == [origin, center] && stroke.color == hud::ORANGE)
+        });
+        let fan_index = index_of(&|shape| matches!(shape, Shape::Mesh(_)));
+        let hub_index = index_of(&|shape| {
+            matches!(shape, Shape::Circle(circle)
+                if circle.center == center && circle.fill == Color32::from_rgb(7, 9, 10))
+        });
+        let plate_index = index_of(&|shape| {
+            matches!(shape, Shape::Rect(rect)
+                if rect.rect == plate && rect.fill == TARGET_PLATE_BACKGROUND)
+        });
+        assert!(base_index < scrim_index);
+        assert!(scrim_index < tether_index);
+        assert!(tether_index < fan_index);
+        assert!(fan_index < hub_index);
+        assert!(hub_index < plate_index);
+
+        let scrim_clipped_index = output
+            .shapes
+            .iter()
+            .position(|clipped| {
+                let mut leaves = Vec::new();
+                collect_leaf_shapes(&clipped.shape, &mut leaves);
+                leaves.iter().any(|shape| {
+                    matches!(shape, Shape::Rect(rect) if rect.fill == scrim && rect.rect == viewport)
+                })
+            })
+            .expect("scrim clipped shape");
+        for clipped in &output.shapes[scrim_clipped_index..] {
+            assert_eq!(clipped.clip_rect, viewport);
+            assert!(viewport.contains(clipped.shape.visual_bounding_rect().min));
+            assert!(viewport.contains(clipped.shape.visual_bounding_rect().max));
+        }
+        output.textures_delta.clear();
+    }
+
+    #[test]
+    fn full_viewport_shield_blocks_underlay_and_outside_click_dismisses() {
+        let context = egui::Context::default();
+        let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 720.0));
+        let target = target_fixture("9.7 GB", "archive", r"C:\Data\archive", r"C:\");
+        let mut arc = TacticalArcState::new_with_motion_query(
+            target,
+            Pos2::new(320.0, 360.0),
+            viewport,
+            false,
+            || Some(false),
+        )
+        .expect("test viewport fits tactical arc");
+        let outside = Pos2::new(1200.0, 40.0);
+        assert!(!arc.geometry.bounds().contains(outside));
+        let button_rect = Rect::from_center_size(outside, Vec2::splat(72.0));
+        let underlay_clicked = Cell::new(false);
+        let mut run_frame = |input: egui::RawInput| {
+            let mut outcome = None;
+            let mut output = context.run_ui(input, |ui| {
+                let response = ui.put(button_rect, egui::Button::new("UNDERLAY"));
+                underlay_clicked.set(underlay_clicked.get() || response.clicked());
+                outcome = arc.show(ui.ctx(), FontId::monospace(9.0));
+            });
+            output.textures_delta.clear();
+            outcome
+        };
+        assert_eq!(run_frame(raw_input(viewport, 1.0, None)), None);
+        let mut click = raw_input(viewport, 2.0, Some(outside));
+        click.events.extend([
+            egui::Event::PointerButton {
+                pos: outside,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+            egui::Event::PointerButton {
+                pos: outside,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]);
+        assert_eq!(run_frame(click), Some(TacticalArcOutcome::Dismiss));
+        assert!(!underlay_clicked.get());
+    }
+
+    #[test]
+    fn pointer_hover_renders_saturated_pulsing_label_and_layered_bounded_glow() {
+        let context = egui::Context::default();
+        let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 720.0));
+        let mut arc = arc_with_motion_query(|| Some(true), false);
+        let pointer = arc.geometry.action_center(TacticalAction::Recycle.index());
+        let mut warm_up = context.run_ui(raw_input(viewport, 9.0, None), |ui| {
+            arc.show(ui.ctx(), FontId::monospace(9.0));
+        });
+        warm_up.textures_delta.clear();
+        let mut baseline = context.run_ui(raw_input(viewport, 10.0, Some(pointer)), |ui| {
+            arc.show(ui.ctx(), FontId::monospace(9.0));
+        });
+        let baseline_text = rendered_text_shapes(&baseline);
+        let baseline_label = rendered_text(&baseline_text, "2  BIN");
+        assert_close(rendered_font_size(baseline_label), 9.0);
+        assert_eq!(rendered_color(baseline_label), ACTIVE_LABEL_INK);
+        baseline.textures_delta.clear();
+
+        let peak_time = 10.0 + f64::from(0.12 * REACTOR_BEAT_SECONDS);
+        let mut settle = context.run_ui(raw_input(viewport, peak_time, None), |ui| {
+            arc.show(ui.ctx(), FontId::monospace(9.0));
+        });
+        settle.textures_delta.clear();
+        let mut peak = context.run_ui(raw_input(viewport, peak_time, None), |ui| {
+            arc.show(ui.ctx(), FontId::monospace(9.0));
+        });
+        let peak_text = rendered_text_shapes(&peak);
+        let peak_label = rendered_text(&peak_text, "2  BIN");
+        assert_close(rendered_font_size(peak_label), 9.0 * 1.095);
+        assert_eq!(rendered_color(peak_label), ACTIVE_LABEL_INK);
+
+        let shapes = leaf_shapes(&peak);
+        let active_mesh = shapes
+            .iter()
+            .find_map(|shape| match shape {
+                Shape::Mesh(mesh)
+                    if mesh
+                        .vertices
+                        .iter()
+                        .all(|vertex| vertex.color == ACTIVE_LIME) =>
+                {
+                    Some(mesh)
+                }
+                _ => None,
+            })
+            .expect("active sector uses exact opaque semantic fill");
+        assert!(
+            active_mesh
+                .vertices
+                .iter()
+                .all(|vertex| vertex.color.to_array() == [0xbd, 0xff, 0x3e, 0xff])
+        );
+        let active_stroke_widths = shapes
+            .iter()
+            .filter_map(|shape| match shape {
+                Shape::Path(path)
+                    if path
+                        .points
+                        .iter()
+                        .any(|point| point.distance(pointer) < OUTER_RADIUS) =>
+                {
+                    Some(path.stroke.width)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(active_stroke_widths.contains(&2.0));
+        assert!(active_stroke_widths.contains(&5.0));
+        assert!(active_stroke_widths.iter().all(|width| *width <= 5.0));
+
+        let repaint_delay = peak
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .expect("root viewport output")
+            .repaint_delay;
+        peak.textures_delta.clear();
+        assert_eq!(repaint_delay, Duration::from_millis(16));
+    }
+
+    #[test]
+    fn reduced_motion_and_keyboard_only_are_static_without_autonomous_repaint() {
+        for query in [Some(false), None] {
+            let context = egui::Context::default();
+            let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 720.0));
+            let mut arc = arc_with_motion_query(|| query, false);
+            let pointer = arc.geometry.action_center(TacticalAction::Recycle.index());
+            let mut first = context.run_ui(raw_input(viewport, 10.0, Some(pointer)), |ui| {
+                arc.show(ui.ctx(), FontId::monospace(9.0));
+            });
+            first.textures_delta.clear();
+            let mut settle = context.run_ui(raw_input(viewport, 20.0, None), |ui| {
+                arc.show(ui.ctx(), FontId::monospace(9.0));
+            });
+            settle.textures_delta.clear();
+            let mut output = context.run_ui(raw_input(viewport, 20.0, None), |ui| {
+                arc.show(ui.ctx(), FontId::monospace(9.0));
+            });
+            let text = rendered_text_shapes(&output);
+            let label = rendered_text(&text, "2  BIN");
+            assert_close(rendered_font_size(label), 9.0);
+            assert_eq!(rendered_color(label), ACTIVE_LABEL_INK);
+            assert_eq!(
+                output
+                    .viewport_output
+                    .get(&egui::ViewportId::ROOT)
+                    .expect("root viewport output")
+                    .repaint_delay,
+                Duration::MAX
+            );
+            output.textures_delta.clear();
+        }
+
+        let context = egui::Context::default();
+        let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 720.0));
+        let mut arc = arc_with_motion_query(|| Some(true), true);
+        let mut warm_up = context.run_ui(raw_input(viewport, 9.0, None), |ui| {
+            arc.show(ui.ctx(), FontId::monospace(9.0));
+        });
+        warm_up.textures_delta.clear();
+        let mut settle = context.run_ui(raw_input(viewport, 10.0, None), |ui| {
+            arc.show(ui.ctx(), FontId::monospace(9.0));
+        });
+        settle.textures_delta.clear();
+        let mut output = context.run_ui(raw_input(viewport, 10.0, None), |ui| {
+            arc.show(ui.ctx(), FontId::monospace(9.0));
+        });
+        let text = rendered_text_shapes(&output);
+        let label = rendered_text(&text, "1  OPEN");
+        assert_close(rendered_font_size(label), 9.0);
+        assert_eq!(rendered_color(label), ACTIVE_LABEL_INK);
+        assert_eq!(
+            output
+                .viewport_output
+                .get(&egui::ViewportId::ROOT)
+                .expect("root viewport output")
+                .repaint_delay,
+            Duration::MAX
+        );
+        output.textures_delta.clear();
+    }
+
+    #[test]
+    fn enter_uses_keyboard_target_while_pointer_owns_visual_selection() {
+        let context = egui::Context::default();
+        let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 720.0));
+        let mut arc = arc_with_motion_query(|| Some(false), true);
+        let pointer = arc.geometry.action_center(TacticalAction::Recycle.index());
+        let mut input = raw_input(viewport, 10.0, Some(pointer));
+        input.events.push(egui::Event::Key {
+            key: Key::Enter,
+            physical_key: Some(Key::Enter),
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        let mut outcome = None;
+        let mut output = context.run_ui(input, |ui| {
+            outcome = arc.show(ui.ctx(), FontId::monospace(9.0));
+        });
+        assert_eq!(arc.visual_active_action(), Some(TacticalAction::Recycle));
+        assert_eq!(
+            outcome,
+            Some(TacticalArcOutcome::Action(TacticalAction::OpenInExplorer))
+        );
+        output.textures_delta.clear();
+    }
+
+    #[test]
+    fn plate_accessibility_identity_and_description_ignore_pulse_frames() {
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 720.0));
+        let mut arc = arc_with_motion_query(|| Some(true), false);
+        let pointer = arc
+            .geometry
+            .action_center(TacticalAction::DeletePermanently.index());
+        let plate_node = |output: &egui::FullOutput| {
+            output
+                .platform_output
+                .accesskit_update
+                .as_ref()
+                .expect("accessibility update")
+                .nodes
+                .iter()
+                .find(|(_, node)| {
+                    node.role() == egui::accesskit::Role::Window && node.label().is_some()
+                })
+                .map(|(id, node)| (*id, node.label().expect("plate description").to_owned()))
+                .expect("plate Window node")
+        };
+        let mut baseline = context.run_ui(raw_input(viewport, 10.0, Some(pointer)), |ui| {
+            arc.show(ui.ctx(), FontId::monospace(9.0));
+        });
+        let baseline_node = plate_node(&baseline);
+        baseline.textures_delta.clear();
+        let mut peak = context.run_ui(
+            raw_input(
+                viewport,
+                10.0 + f64::from(0.12 * REACTOR_BEAT_SECONDS),
+                None,
+            ),
+            |ui| {
+                arc.show(ui.ctx(), FontId::monospace(9.0));
+            },
+        );
+        let peak_node = plate_node(&peak);
+        peak.textures_delta.clear();
+        assert_eq!(peak_node, baseline_node);
+        assert!(peak_node.1.contains("DELETE WITHOUT RECOVERY"));
+        assert!(!peak_node.1.contains("1.095"));
+        assert!(!peak_node.1.contains("pulse"));
     }
 }
