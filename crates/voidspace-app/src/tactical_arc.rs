@@ -1,6 +1,6 @@
 use std::{f32::consts::PI, path::PathBuf};
 
-use egui::{Align2, Color32, FontId, Id, Key, Pos2, Rect, Sense, Shape, Stroke, Vec2};
+use egui::{Align2, Color32, FontId, Galley, Id, Key, Pos2, Rect, Sense, Shape, Stroke, Vec2};
 use voidspace_model::{FileIdentity, NodeId, NodeKind, ScanId};
 
 use crate::hud;
@@ -14,6 +14,7 @@ const TARGET_PLATE_HEIGHT: f32 = 94.0;
 const TARGET_PLATE_GAP: f32 = 12.0;
 const TARGET_PLATE_INSET: f32 = 12.0;
 const TARGET_PLATE_IDENTITY_GAP: f32 = 8.0;
+const TARGET_PLATE_TAG: &str = "OBJECT / ACTION TARGET";
 const TARGET_PLATE_TAG_CENTER_Y: f32 = 15.0;
 const TARGET_PLATE_IDENTITY_CENTER_Y: f32 = 36.0;
 const TARGET_PLATE_PATH_CENTER_Y: f32 = 56.0;
@@ -429,13 +430,20 @@ fn geometry_for_area_painter(
 struct TargetPlateText {
     fitted_name: String,
     fitted_path: String,
-    identity_font: FontId,
-    small_font: FontId,
+    fonts: TargetPlateFonts,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct TargetPlateFonts {
+    tag: FontId,
+    size: FontId,
+    name: FontId,
+    small: FontId,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 struct TargetPlateTextCacheKey {
-    font: FontId,
+    fonts: TargetPlateFonts,
     geometry_scale_bits: u32,
 }
 
@@ -449,14 +457,21 @@ fn scaled_font(font: &FontId, points: f32, scale: f32) -> FontId {
     FontId::new(points * scale, font.family.clone())
 }
 
-fn target_kind_label(kind: NodeKind) -> &'static str {
-    match kind {
-        NodeKind::File => "FILE",
-        NodeKind::Directory => "FOLDER",
-        NodeKind::Stream => "STREAM",
-        NodeKind::FreeSpace => "FREE SPACE",
-        NodeKind::Unknown => "TARGET",
+fn target_plate_fonts(font: &FontId, scale: f32) -> TargetPlateFonts {
+    TargetPlateFonts {
+        tag: scaled_font(font, 8.0, scale),
+        size: scaled_font(font, 13.0, scale),
+        name: scaled_font(font, 20.0, scale),
+        small: scaled_font(font, 9.0, scale),
     }
+}
+
+fn galley_baseline(galley: &Galley) -> f32 {
+    galley
+        .rows
+        .first()
+        .and_then(|row| row.glyphs.first().map(|glyph| row.pos.y + glyph.pos.y))
+        .unwrap_or(galley.size().y * 0.5)
 }
 
 fn target_path_anchors(target: &ContextTarget, path: &str) -> Option<(String, String)> {
@@ -488,15 +503,13 @@ fn fit_target_plate_text(
     target: &ContextTarget,
     plate: Rect,
     scale: f32,
-    font: &FontId,
+    fonts: &TargetPlateFonts,
 ) -> Option<TargetPlateText> {
-    let identity_font = scaled_font(font, 16.0, scale);
-    let small_font = scaled_font(font, 9.0, scale);
     let content_width = plate.width() - TARGET_PLATE_INSET * 2.0 * scale;
     let size_width = painter
         .layout_no_wrap(
             target.display_size.clone(),
-            identity_font.clone(),
+            fonts.size.clone(),
             Color32::WHITE,
         )
         .size()
@@ -507,7 +520,7 @@ fn fit_target_plate_text(
     }
     let fitted_name = primitives::end_ellipsis(&target.display_name, name_width, 4, |value| {
         painter
-            .layout_no_wrap(value.to_owned(), identity_font.clone(), Color32::WHITE)
+            .layout_no_wrap(value.to_owned(), fonts.name.clone(), Color32::WHITE)
             .size()
             .x
     })?;
@@ -517,7 +530,7 @@ fn fit_target_plate_text(
     let fitted_path =
         primitives::middle_ellipsis(&path, &prefix, &suffix, content_width, |value| {
             painter
-                .layout_no_wrap(value.to_owned(), small_font.clone(), Color32::WHITE)
+                .layout_no_wrap(value.to_owned(), fonts.small.clone(), Color32::WHITE)
                 .size()
                 .x
         })?;
@@ -525,8 +538,7 @@ fn fit_target_plate_text(
     Some(TargetPlateText {
         fitted_name,
         fitted_path,
-        identity_font,
-        small_font,
+        fonts: fonts.clone(),
     })
 }
 
@@ -580,8 +592,9 @@ impl TacticalArcState {
         geometry_scale: f32,
         font: &FontId,
     ) -> bool {
+        let fonts = target_plate_fonts(font, geometry_scale);
         let key = TargetPlateTextCacheKey {
-            font: font.clone(),
+            fonts: fonts.clone(),
             geometry_scale_bits: geometry_scale.to_bits(),
         };
         if self
@@ -597,7 +610,7 @@ impl TacticalArcState {
             self.target_plate_fit_count += 1;
         }
         self.target_plate_text_cache =
-            fit_target_plate_text(painter, &self.target, plate, geometry_scale, font)
+            fit_target_plate_text(painter, &self.target, plate, geometry_scale, &fonts)
                 .map(|text| TargetPlateTextCache { key, text });
         self.target_plate_text_cache.is_some()
     }
@@ -765,30 +778,32 @@ impl TacticalArcState {
                         plate.top() + TARGET_PLATE_TAG_CENTER_Y * draw_geometry.scale,
                     ),
                     Align2::LEFT_CENTER,
-                    target_kind_label(self.target.kind),
-                    plate_text.small_font.clone(),
+                    TARGET_PLATE_TAG,
+                    plate_text.fonts.tag.clone(),
                     hud::ORANGE,
                 );
                 let identity_y = plate.top() + TARGET_PLATE_IDENTITY_CENTER_Y * draw_geometry.scale;
                 let size_galley = painter.layout_no_wrap(
                     self.target.display_size.clone(),
-                    plate_text.identity_font.clone(),
+                    plate_text.fonts.size.clone(),
                     hud::ORANGE,
                 );
                 let size_width = size_galley.size().x;
-                painter.galley(
-                    Pos2::new(text_x, identity_y - size_galley.size().y * 0.5),
-                    size_galley,
-                    hud::ORANGE,
+                let name_galley = painter.layout_no_wrap(
+                    plate_text.fitted_name.clone(),
+                    plate_text.fonts.name.clone(),
+                    Color32::WHITE,
                 );
-                painter.text(
+                let name_y = identity_y - name_galley.size().y * 0.5;
+                let identity_baseline = name_y + galley_baseline(&name_galley);
+                let size_y = identity_baseline - galley_baseline(&size_galley);
+                painter.galley(Pos2::new(text_x, size_y), size_galley, hud::ORANGE);
+                painter.galley(
                     Pos2::new(
                         text_x + size_width + TARGET_PLATE_IDENTITY_GAP * draw_geometry.scale,
-                        identity_y,
+                        name_y,
                     ),
-                    Align2::LEFT_CENTER,
-                    &plate_text.fitted_name,
-                    plate_text.identity_font.clone(),
+                    name_galley,
                     Color32::WHITE,
                 );
                 painter.text(
@@ -798,7 +813,7 @@ impl TacticalArcState {
                     ),
                     Align2::LEFT_CENTER,
                     &plate_text.fitted_path,
-                    plate_text.small_font.clone(),
+                    plate_text.fonts.small.clone(),
                     TARGET_PLATE_MUTED,
                 );
                 let separator_y = plate.top() + TARGET_PLATE_SEPARATOR_Y * draw_geometry.scale;
@@ -816,7 +831,7 @@ impl TacticalArcState {
                     ),
                     Align2::LEFT_CENTER,
                     selected.map_or("SELECT COMMAND", |sector| sector.action.label()),
-                    plate_text.small_font.clone(),
+                    plate_text.fonts.small.clone(),
                     selected.map_or(Color32::WHITE, |sector| sector.color),
                 );
                 let plate_response = ui.interact(
@@ -978,6 +993,19 @@ mod tests {
 
     fn logical_text_rect(shape: &egui::epaint::TextShape) -> Rect {
         Rect::from_min_size(shape.pos, shape.galley.size())
+    }
+
+    fn rendered_font_size(shape: &egui::epaint::TextShape) -> f32 {
+        shape.galley.job.sections[0].format.font_id.size
+    }
+
+    fn rendered_color(shape: &egui::epaint::TextShape) -> Color32 {
+        shape.galley.job.sections[0].format.color
+    }
+
+    fn rendered_baseline(shape: &egui::epaint::TextShape) -> f32 {
+        let row = &shape.galley.rows[0];
+        shape.pos.y + row.pos.y + row.glyphs[0].pos.y
     }
 
     fn relative_luminance(color: Color32) -> f32 {
@@ -1399,23 +1427,31 @@ mod tests {
         });
 
         let text = rendered_text_shapes(&output);
-        let tag = logical_text_rect(rendered_text(&text, "FOLDER"));
-        let size = logical_text_rect(rendered_text(&text, "9.7 GB"));
-        let name = logical_text_rect(rendered_text(&text, "archive"));
+        let tag_shape = rendered_text(&text, "OBJECT / ACTION TARGET");
+        let size_shape = rendered_text(&text, "9.7 GB");
+        let name_shape = rendered_text(&text, "archive");
+        let tag = logical_text_rect(tag_shape);
+        let size = logical_text_rect(size_shape);
+        let name = logical_text_rect(name_shape);
         let path = logical_text_rect(rendered_text(&text, r"C:\Data\archive"));
         let action = logical_text_rect(rendered_text(&text, "SELECT COMMAND"));
         assert_close(tag.left(), plate.left() + 12.0);
         assert_close(tag.center().y, plate.top() + 15.0);
         assert_close(size.left(), plate.left() + 12.0);
-        assert_close(size.center().y, plate.top() + 36.0);
         assert_close(name.left(), size.right() + 8.0);
         assert_close(name.center().y, plate.top() + 36.0);
         assert_close(path.left(), plate.left() + 12.0);
         assert_close(path.center().y, plate.top() + 56.0);
         assert_close(action.left(), plate.left() + 12.0);
         assert_close(action.center().y, plate.top() + 79.0);
-        assert!(size.height() > path.height());
-        assert!(name.height() > path.height());
+        assert_close(rendered_font_size(tag_shape), 8.0);
+        assert_close(rendered_font_size(size_shape), 13.0);
+        assert_close(rendered_font_size(name_shape), 20.0);
+        assert!(rendered_font_size(name_shape) > rendered_font_size(size_shape));
+        assert_eq!(rendered_color(tag_shape), hud::ORANGE);
+        assert_eq!(rendered_color(size_shape), hud::ORANGE);
+        assert_eq!(rendered_color(name_shape), Color32::WHITE);
+        assert_close(rendered_baseline(size_shape), rendered_baseline(name_shape));
 
         fn has_separator(shape: &Shape, plate: Rect) -> bool {
             match shape {
@@ -1463,9 +1499,12 @@ mod tests {
         });
         let text = rendered_text_shapes(&output);
         let scale = COMPACT_SCALE;
-        let tag = logical_text_rect(rendered_text(&text, "FOLDER"));
-        let size = logical_text_rect(rendered_text(&text, "9.7 GB"));
-        let name = logical_text_rect(rendered_text(&text, "archive"));
+        let tag_shape = rendered_text(&text, "OBJECT / ACTION TARGET");
+        let size_shape = rendered_text(&text, "9.7 GB");
+        let name_shape = rendered_text(&text, "archive");
+        let tag = logical_text_rect(tag_shape);
+        let size = logical_text_rect(size_shape);
+        let name = logical_text_rect(name_shape);
         let path = logical_text_rect(rendered_text(&text, r"C:\Data\archive"));
         let action = logical_text_rect(rendered_text(&text, "SELECT COMMAND"));
 
@@ -1476,14 +1515,13 @@ mod tests {
         );
         assert_close(size.left(), plate.left() + TARGET_PLATE_INSET * scale);
         assert_close(
-            size.center().y,
-            plate.top() + TARGET_PLATE_IDENTITY_CENTER_Y * scale,
-        );
-        assert_close(
             name.left(),
             size.right() + TARGET_PLATE_IDENTITY_GAP * scale,
         );
-        assert_close(name.center().y, size.center().y);
+        assert_close(
+            name.center().y,
+            plate.top() + TARGET_PLATE_IDENTITY_CENTER_Y * scale,
+        );
         assert_close(path.left(), plate.left() + TARGET_PLATE_INSET * scale);
         assert_close(
             path.center().y,
@@ -1494,6 +1532,11 @@ mod tests {
             action.center().y,
             plate.top() + TARGET_PLATE_ACTION_CENTER_Y * scale,
         );
+        assert_close(rendered_font_size(tag_shape), 8.0 * scale);
+        assert_close(rendered_font_size(size_shape), 13.0 * scale);
+        assert_close(rendered_font_size(name_shape), 20.0 * scale);
+        assert!(rendered_font_size(name_shape) > rendered_font_size(size_shape));
+        assert_close(rendered_baseline(size_shape), rendered_baseline(name_shape));
 
         let expected_separator_y = plate.top() + TARGET_PLATE_SEPARATOR_Y * scale;
         let expected_separator_left = plate.left() + TARGET_PLATE_INSET * scale;
@@ -1555,6 +1598,7 @@ mod tests {
             arc.show(ui.ctx(), FontId::monospace(9.0));
         });
         let text = rendered_text_shapes(&output);
+        let size_shape = rendered_text(&text, "184.0 GiB");
         let fitted_name = text
             .iter()
             .map(|shape| shape.galley.text())
@@ -1564,6 +1608,26 @@ mod tests {
         assert!(fitted_name.starts_with(&first_four));
         assert!(fitted_name.graphemes(true).count() >= 5);
         assert_ne!(fitted_name, full_name);
+        let fitted_name_shape = rendered_text(&text, fitted_name);
+        let content_width = allocated_plate.width() - TARGET_PLATE_INSET * 2.0 * arc.geometry.scale;
+        let measured_name_width = content_width
+            - size_shape.galley.size().x
+            - TARGET_PLATE_IDENTITY_GAP * arc.geometry.scale;
+        let expected_name = primitives::end_ellipsis(full_name, measured_name_width, 4, |value| {
+            context.fonts_mut(|fonts| {
+                fonts
+                    .layout_no_wrap(value.to_owned(), FontId::monospace(20.0), Color32::WHITE)
+                    .size()
+                    .x
+            })
+        })
+        .expect("four leading name graphemes plus ellipsis fit after complete size reservation");
+        assert_eq!(fitted_name, expected_name);
+        assert_eq!(size_shape.galley.text(), "184.0 GiB");
+        assert_close(
+            logical_text_rect(fitted_name_shape).left(),
+            logical_text_rect(size_shape).right() + TARGET_PLATE_IDENTITY_GAP * arc.geometry.scale,
+        );
 
         let fitted_path = text
             .iter()
@@ -1584,7 +1648,7 @@ mod tests {
         let context = egui::Context::default();
         let work_area = Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 720.0));
         let target = target_fixture(
-            "1234567890123456789012",
+            "1234567890123456789012345678901234567890",
             "WWWWWW",
             r"C:\Data\WWWWWW",
             r"C:\",
@@ -1729,6 +1793,15 @@ mod tests {
             output.textures_delta.clear();
         }
         assert_eq!(arc.target_plate_fit_count, 1, "same key must reuse fit");
+
+        let mut base_size_output = context.run_ui(input.clone(), |ui| {
+            arc.show(ui.ctx(), FontId::monospace(37.0));
+        });
+        base_size_output.textures_delta.clear();
+        assert_eq!(
+            arc.target_plate_fit_count, 1,
+            "base size change must reuse the identical actual scaled font set"
+        );
 
         let mut font_output = context.run_ui(input.clone(), |ui| {
             arc.show(ui.ctx(), FontId::proportional(9.0));
