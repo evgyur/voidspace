@@ -938,22 +938,25 @@ pub fn show(ui: &mut Ui, request: ShowRequest<'_>) -> TreemapResponse {
     let nested_responses = hit_responses(ui, base_layout.root, nested_hits);
     let mut action = None;
     let secondary_clicked = ui.input(|input| input.pointer.secondary_clicked());
-    let mut context_target = secondary_clicked
-        .then(|| {
-            pointer
-                .and_then(|position| context_hit_at(position, &context_hits))
-                .and_then(|hit| {
-                    file_action_target(hit).map(|node_id| {
-                        (
-                            node_id,
-                            tile_response_id(ui, base_layout.root, hit),
-                            false,
-                            hit.rect,
-                        )
-                    })
-                })
-        })
+    let context_hit = secondary_clicked
+        .then(|| pointer.and_then(|position| context_hit_at(position, &context_hits)))
         .flatten();
+    let mut context_target = None;
+    if let Some(hit) = context_hit {
+        match context_intent_for_hit(hit) {
+            ContextIntent::File(node_id) => {
+                context_target = Some((
+                    node_id,
+                    tile_response_id(ui, base_layout.root, hit),
+                    false,
+                    hit.rect,
+                ));
+            }
+            ContextIntent::OpenAggregate(selection) => {
+                action = Some(TreemapAction::OpenAggregate(selection));
+            }
+        }
+    }
     for (hit, tile_response) in nested_responses
         .iter()
         .rev()
@@ -1008,6 +1011,25 @@ fn file_action_target(hit: &VisibleHit) -> Option<NodeId> {
     (!hit.aggregated).then_some(hit.node_id)
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ContextIntent {
+    File(NodeId),
+    OpenAggregate(AggregateSelection),
+}
+
+fn context_intent_for_hit(hit: &VisibleHit) -> ContextIntent {
+    file_action_target(hit).map_or_else(
+        || {
+            ContextIntent::OpenAggregate(AggregateSelection {
+                parent: hit.node_id,
+                depth: hit.depth,
+                members: hit.aggregate_members.clone(),
+            })
+        },
+        ContextIntent::File,
+    )
+}
+
 fn hit_responses(
     ui: &mut Ui,
     root: NodeId,
@@ -1029,7 +1051,7 @@ fn hit_responses(
                 )
             });
             let hint = if hit.aggregated {
-                "Click: inspect · Double-click: open OTHER"
+                "Click / right-click: open OTHER · Double-click: zoom"
             } else if hit.expandable {
                 "Click: expand · Double-click: zoom"
             } else {
@@ -1393,7 +1415,7 @@ mod interaction_tests {
     }
 
     #[test]
-    fn context_hit_on_other_never_falls_through_to_its_parent() {
+    fn context_hit_on_other_opens_the_exact_aggregate_instead_of_falling_through() {
         let parent = VisibleHit {
             node_id: NodeId(20),
             rect: Rect::from_min_max(Pos2::ZERO, Pos2::new(200.0, 200.0)),
@@ -1411,13 +1433,21 @@ mod interaction_tests {
             aggregated: true,
             expandable: false,
             name: "OTHER".into(),
+            aggregate_members: vec![NodeId(22), NodeId(23)],
             ..parent.clone()
         };
         let hits = [parent, other];
 
-        let target = context_hit_at(Pos2::new(100.0, 100.0), &hits).and_then(file_action_target);
+        let intent = context_hit_at(Pos2::new(100.0, 100.0), &hits).map(context_intent_for_hit);
 
-        assert_eq!(target, None);
+        assert_eq!(
+            intent,
+            Some(ContextIntent::OpenAggregate(AggregateSelection {
+                parent: NodeId(21),
+                depth: 2,
+                members: vec![NodeId(22), NodeId(23)],
+            }))
+        );
     }
 
     #[test]

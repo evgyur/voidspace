@@ -88,8 +88,12 @@ mod primitives {
         let geometry_scale = geometry_scale.max(0.0);
         let fill = Color32::from_rgb(semantic_color.r(), semantic_color.g(), semantic_color.b());
         let bloom_alpha = (72.0 + 112.0 * intensity).round() as u8;
-        let bloom_color =
-            Color32::from_rgba_unmultiplied(fill.r(), fill.g(), fill.b(), bloom_alpha);
+        let bloom_color = Color32::from_rgba_unmultiplied(
+            super::TARGET_LOCK_RED.r(),
+            super::TARGET_LOCK_RED.g(),
+            super::TARGET_LOCK_RED.b(),
+            bloom_alpha,
+        );
         ActiveSectorStyle {
             fill,
             inner_stroke: Stroke::new(2.0 * geometry_scale, fill),
@@ -628,17 +632,8 @@ fn animation_repaint_after(
     (motion_enabled && pointer_hovered_action.is_some()).then(|| Duration::from_millis(16))
 }
 
-fn paint_source_target_lock(
-    painter: &egui::Painter,
-    rect: Rect,
-    intensity: f32,
-    geometry_scale: f32,
-) {
-    let intensity = intensity.clamp(0.0, 1.0);
+fn paint_source_target_lock(painter: &egui::Painter, rect: Rect, geometry_scale: f32) {
     let scale = geometry_scale.max(COMPACT_SCALE);
-    let tint_alpha = (34.0 + intensity * 34.0).round() as u8;
-    let middle_alpha = (88.0 + intensity * 86.0).round() as u8;
-    let outer_alpha = (28.0 + intensity * 48.0).round() as u8;
     painter.rect_filled(
         rect,
         0.0,
@@ -646,19 +641,19 @@ fn paint_source_target_lock(
             TARGET_LOCK_RED.r(),
             TARGET_LOCK_RED.g(),
             TARGET_LOCK_RED.b(),
-            tint_alpha,
+            42,
         ),
     );
     painter.rect_stroke(
         rect.expand(8.0 * scale),
         2.0 * scale,
         Stroke::new(
-            (8.0 + 4.0 * intensity) * scale,
+            8.0 * scale,
             Color32::from_rgba_unmultiplied(
                 TARGET_LOCK_RED.r(),
                 TARGET_LOCK_RED.g(),
                 TARGET_LOCK_RED.b(),
-                outer_alpha,
+                38,
             ),
         ),
         egui::StrokeKind::Inside,
@@ -667,12 +662,12 @@ fn paint_source_target_lock(
         rect.expand(3.0 * scale),
         1.0 * scale,
         Stroke::new(
-            (4.0 + 2.0 * intensity) * scale,
+            4.0 * scale,
             Color32::from_rgba_unmultiplied(
                 TARGET_LOCK_RED.r(),
                 TARGET_LOCK_RED.g(),
                 TARGET_LOCK_RED.b(),
-                middle_alpha,
+                112,
             ),
         ),
         egui::StrokeKind::Inside,
@@ -680,7 +675,7 @@ fn paint_source_target_lock(
     painter.rect_stroke(
         rect,
         0.0,
-        Stroke::new((2.0 + intensity) * scale, TARGET_LOCK_RED),
+        Stroke::new(2.25 * scale, TARGET_LOCK_RED),
         egui::StrokeKind::Inside,
     );
     hud::paint_corner_brackets(painter, rect.shrink(4.0 * scale), TARGET_LOCK_RED);
@@ -705,7 +700,6 @@ pub struct TacticalArcState {
     focus_request_pending: bool,
     pointer_hovered_action: Option<TacticalAction>,
     pointer_beat_started_at: Option<f64>,
-    target_beat_started_at: Option<f64>,
     motion_enabled: bool,
     armed: bool,
     target_semantics: TargetSemantics,
@@ -823,7 +817,6 @@ impl TacticalArcState {
             focus_request_pending: keyboard_open,
             pointer_hovered_action: None,
             pointer_beat_started_at: None,
-            target_beat_started_at: None,
             motion_enabled: query().unwrap_or(false),
             armed: false,
             target_semantics,
@@ -939,7 +932,6 @@ impl TacticalArcState {
         let pointer = context.pointer_hover_pos();
         let hovered = pointer.and_then(|position| geometry.hit_test(position));
         let now = context.input(|input| input.time);
-        self.target_beat_started_at.get_or_insert(now);
         self.update_pointer_hover(hovered, now);
         let focused = context.memory(|memory| memory.focused());
         if let Some(slot) = (0..ModalFocusSlot::COUNT)
@@ -1040,7 +1032,6 @@ impl TacticalArcState {
         let pointer = context.pointer_hover_pos();
         let hovered = pointer.and_then(|position| geometry.hit_test(position));
         let now = context.input(|input| input.time);
-        let target_beat_started_at = *self.target_beat_started_at.get_or_insert(now);
         self.update_pointer_hover(hovered, now);
         let visual_active_action = self.visual_active_action();
         let pointer_beat_intensity = if self.motion_enabled && hovered.is_some() {
@@ -1053,14 +1044,6 @@ impl TacticalArcState {
         if let Some(delay) = animation_repaint_after(self.motion_enabled, hovered) {
             context.request_repaint_after(delay);
         }
-        if self.motion_enabled && self.source_rect.is_some() {
-            context.request_repaint_after(Duration::from_millis(16));
-        }
-        let target_beat_intensity = if self.motion_enabled {
-            primitives::reactor_beat((now - target_beat_started_at) as f32)
-        } else {
-            0.0
-        };
         let modal_area = egui::Area::new(Id::new("tactical-arc"))
             .order(egui::Order::Foreground)
             .sense(Sense::CLICK)
@@ -1084,12 +1067,7 @@ impl TacticalArcState {
             if let Some(source_rect) = self.source_rect {
                 let source_rect = source_rect.intersect(content_rect);
                 if source_rect.width() > 2.0 && source_rect.height() > 2.0 {
-                    paint_source_target_lock(
-                        &painter,
-                        source_rect,
-                        target_beat_intensity,
-                        draw_geometry.scale,
-                    );
+                    paint_source_target_lock(&painter, source_rect, draw_geometry.scale);
                 }
             }
             if draw_geometry.origin.distance(center) > 2.0 {
@@ -1610,6 +1588,13 @@ mod tests {
         assert_close(baseline.label_scale, 1.0);
         assert_close(peak.label_scale, 1.095);
         assert_eq!(baseline.inner_stroke.color, ACTIVE_CYAN);
+        for bloom in [baseline.outer_bloom.color, peak.outer_bloom.color] {
+            let [red, green, blue, _] = bloom.to_srgba_unmultiplied();
+            assert!(red.abs_diff(TARGET_LOCK_RED.r()) <= 2);
+            assert!(green.abs_diff(TARGET_LOCK_RED.g()) <= 2);
+            assert!(blue.abs_diff(TARGET_LOCK_RED.b()) <= 2);
+        }
+        assert!(peak.outer_bloom.color.a() > baseline.outer_bloom.color.a());
         assert_close(baseline.inner_stroke.width, 2.0 * 0.75);
         assert!(baseline.outer_bloom.width <= 5.0 * 0.75);
         assert_close(peak.outer_bloom.width, 5.0 * 0.75);
@@ -3047,7 +3032,7 @@ mod tests {
     }
 
     #[test]
-    fn source_target_renders_a_visible_saturated_red_lock_above_the_scrim() {
+    fn source_target_lock_is_static_while_sector_buttons_own_the_reactor_beat() {
         let context = egui::Context::default();
         let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 720.0));
         let source_rect = Rect::from_min_max(Pos2::new(36.0, 72.0), Pos2::new(356.0, 292.0));
@@ -3110,7 +3095,7 @@ mod tests {
                 .get(&egui::ViewportId::ROOT)
                 .expect("root viewport output")
                 .repaint_delay,
-            Duration::from_millis(16)
+            Duration::MAX
         );
         output.textures_delta.clear();
     }
