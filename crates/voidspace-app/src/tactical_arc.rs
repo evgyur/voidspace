@@ -88,12 +88,8 @@ mod primitives {
         let geometry_scale = geometry_scale.max(0.0);
         let fill = Color32::from_rgb(semantic_color.r(), semantic_color.g(), semantic_color.b());
         let bloom_alpha = (72.0 + 112.0 * intensity).round() as u8;
-        let bloom_color = Color32::from_rgba_unmultiplied(
-            super::TARGET_LOCK_RED.r(),
-            super::TARGET_LOCK_RED.g(),
-            super::TARGET_LOCK_RED.b(),
-            bloom_alpha,
-        );
+        let bloom_color =
+            Color32::from_rgba_unmultiplied(fill.r(), fill.g(), fill.b(), bloom_alpha);
         ActiveSectorStyle {
             fill,
             inner_stroke: Stroke::new(2.0 * geometry_scale, fill),
@@ -1582,7 +1578,7 @@ mod tests {
     }
 
     #[test]
-    fn active_style_scales_the_label_and_caps_bloom_width() {
+    fn active_style_pulses_with_its_own_semantic_bloom_and_caps_width() {
         let baseline = active_sector_style(ACTIVE_CYAN, 0.0, 0.75);
         let peak = active_sector_style(ACTIVE_CYAN, 1.0, 0.75);
         assert_close(baseline.label_scale, 1.0);
@@ -1590,9 +1586,9 @@ mod tests {
         assert_eq!(baseline.inner_stroke.color, ACTIVE_CYAN);
         for bloom in [baseline.outer_bloom.color, peak.outer_bloom.color] {
             let [red, green, blue, _] = bloom.to_srgba_unmultiplied();
-            assert!(red.abs_diff(TARGET_LOCK_RED.r()) <= 2);
-            assert!(green.abs_diff(TARGET_LOCK_RED.g()) <= 2);
-            assert!(blue.abs_diff(TARGET_LOCK_RED.b()) <= 2);
+            assert!(red.abs_diff(ACTIVE_CYAN.r()) <= 2);
+            assert!(green.abs_diff(ACTIVE_CYAN.g()) <= 2);
+            assert!(blue.abs_diff(ACTIVE_CYAN.b()) <= 2);
         }
         assert!(peak.outer_bloom.color.a() > baseline.outer_bloom.color.a());
         assert_close(baseline.inner_stroke.width, 2.0 * 0.75);
