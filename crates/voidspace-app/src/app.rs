@@ -612,7 +612,7 @@ impl VoidspaceApp {
         if self
             .tactical_arc
             .as_ref()
-            .is_some_and(|arc| arc.target.scan_id == restarting_scan_id)
+            .is_some_and(|arc| arc.target().scan_id == restarting_scan_id)
         {
             self.tactical_arc = None;
             self.overlays.dismiss_transient();
@@ -916,7 +916,7 @@ impl VoidspaceApp {
         if self
             .tactical_arc
             .as_ref()
-            .is_some_and(|arc| arc.target.scan_id == self.tabs[index].snapshot.scan_id)
+            .is_some_and(|arc| arc.target().scan_id == self.tabs[index].snapshot.scan_id)
         {
             self.tactical_arc = None;
             self.overlays.dismiss_transient();
@@ -1437,17 +1437,24 @@ impl VoidspaceApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(theme::MAP_BG).inner_margin(8.0))
             .show(root_ui, |ui| {
-                if mode == WorkspaceMode::DrawerClosed && ui.button("DETAILS").clicked() {
+                if !suppress_treemap
+                    && mode == WorkspaceMode::DrawerClosed
+                    && ui.button("DETAILS").clicked()
+                {
                     open_inspector_drawer = true;
                 }
                 let mut show_volume_picker = false;
-                if ui.ctx().input_mut(|input| {
-                    input.consume_key(egui::Modifiers::ALT, egui::Key::ArrowLeft)
-                }) {
+                if !suppress_treemap
+                    && ui.ctx().input_mut(|input| {
+                        input.consume_key(egui::Modifiers::ALT, egui::Key::ArrowLeft)
+                    })
+                {
                     show_volume_picker |= apply_navigation(tab, NavigationIntent::Back);
                 }
                 let navigation = treemap_navigation(ui, tab);
-                show_volume_picker |= apply_navigation(tab, navigation);
+                if !suppress_treemap {
+                    show_volume_picker |= apply_navigation(tab, navigation);
+                }
                 ui.separator();
                 let aggregate_view = tab.treemap_state.aggregate_views.last().cloned();
                 let view_root = aggregate_view.as_ref().map_or_else(
@@ -1756,7 +1763,11 @@ impl VoidspaceApp {
         }
     }
 
-    fn show_transient_overlays(&mut self, context: &egui::Context) {
+    fn show_transient_overlays(
+        &mut self,
+        context: &egui::Context,
+        tactical_arc_input_outcome: Option<TacticalArcOutcome>,
+    ) {
         let transient = self.overlays.transient();
         let escape_pressed = context.input(|input| input.key_pressed(egui::Key::Escape));
         if escape_pressed && transient == Some(TransientOverlay::CompactFilter) {
@@ -1771,7 +1782,7 @@ impl VoidspaceApp {
             && self
                 .tactical_arc
                 .as_ref()
-                .is_some_and(|arc| !self.tactical_target_is_current(&arc.target))
+                .is_some_and(|arc| !self.tactical_target_is_current(arc.target()))
         {
             self.tactical_arc = None;
             self.overlays.close_transient(context);
@@ -1783,17 +1794,21 @@ impl VoidspaceApp {
         }
         match self.overlays.transient() {
             Some(TransientOverlay::TacticalArc) => {
-                let chosen = self.tactical_arc.as_mut().and_then(|arc| {
-                    arc.show(
-                        context,
-                        self.typography.font(theme::TypographyToken::DataCompact),
-                    )
-                });
+                let chosen = self
+                    .tactical_arc
+                    .as_mut()
+                    .and_then(|arc| {
+                        arc.paint(
+                            context,
+                            self.typography.font(theme::TypographyToken::DataCompact),
+                        )
+                    })
+                    .or(tactical_arc_input_outcome);
                 match chosen {
                     Some(TacticalArcOutcome::Action(action)) => {
                         if let Some(arc) = self.tactical_arc.take() {
                             self.overlays.close_transient(context);
-                            self.execute_tactical_action(arc.target, action);
+                            self.execute_tactical_action(arc.into_target(), action);
                         }
                     }
                     Some(TacticalArcOutcome::Dismiss) => {
@@ -2476,11 +2491,24 @@ impl eframe::App for VoidspaceApp {
             let _new_typography_epoch = self.typography.epoch();
             ui.ctx().request_repaint();
         }
+        let tactical_arc_active_at_frame_start = self.overlays.transient()
+            == Some(TransientOverlay::TacticalArc)
+            && self.tactical_arc.is_some();
+        let tactical_arc_input_outcome = tactical_arc_active_at_frame_start
+            .then(|| {
+                self.tactical_arc
+                    .as_mut()
+                    .and_then(|arc| arc.resolve_input(ui.ctx()))
+            })
+            .flatten();
+        if self.overlays.owns_pointer() {
+            ui.disable();
+        }
         self.top_bar(ui);
         self.tab_bar(ui);
         self.status_bar(ui);
         self.workspace(ui);
-        self.show_transient_overlays(ui.ctx());
+        self.show_transient_overlays(ui.ctx(), tactical_arc_input_outcome);
         self.fileop_dialog(ui.ctx());
         self.show_passive_toast(ui.ctx());
     }
@@ -2759,5 +2787,216 @@ mod status_bar_tests {
         assert_eq!(geometry.height, 48.0);
         assert!(geometry.vertical_margin >= 7);
         assert!(geometry.content_height() >= 32.0);
+    }
+}
+
+#[cfg(test)]
+mod tactical_arc_frame_routing_tests {
+    use std::sync::Arc;
+
+    use eframe::App as _;
+    use voidspace_index::{IndexSnapshot, NodeSnapshot};
+    use voidspace_model::{FileIdentity, NodeFlags, NodeKind, ScanId, VolumeId, WinName};
+
+    use super::*;
+
+    fn node(
+        id: u32,
+        parent: Option<u32>,
+        children: Vec<u32>,
+        name: &str,
+        kind: NodeKind,
+    ) -> NodeSnapshot {
+        NodeSnapshot {
+            id: NodeId(id),
+            parent: parent.map(NodeId),
+            children: children.into_iter().map(NodeId).collect(),
+            name: WinName::from(name),
+            identity: FileIdentity::stable(VolumeId::local_for_test(1), u128::from(id), 1),
+            kind,
+            flags: NodeFlags::default(),
+            logical: 1,
+            allocated: 1,
+            physical_allocated: 1,
+        }
+    }
+
+    fn app_with_open_keyboard_arc(context: &egui::Context, viewport: egui::Rect) -> VoidspaceApp {
+        let nodes = vec![
+            node(0, None, vec![1], "root", NodeKind::Directory),
+            node(1, Some(0), vec![2], "A", NodeKind::Directory),
+            node(2, Some(1), vec![], "leaf", NodeKind::File),
+        ];
+        let snapshot = IndexSnapshot {
+            scan_id: ScanId(1),
+            generation: 1,
+            index_version: 1,
+            root: NodeId(0),
+            nodes: Arc::new(nodes),
+        };
+        let root_identity = snapshot.node(NodeId(0)).unwrap().identity.clone();
+        let mut treemap_state = TreemapState::new(snapshot.root);
+        treemap_state
+            .view_path
+            .rebuild(NodeId(1), |id| {
+                snapshot.node(id).and_then(|node| node.parent)
+            })
+            .unwrap();
+        let (_event_tx, event_rx) = bounded(1);
+        let (_watch_tx, watcher_events) = bounded(1);
+        let tab = ScanTab {
+            title: "C:".to_owned(),
+            root_path: PathBuf::from(r"C:\"),
+            generation: 1,
+            index: Index::new(ScanId(1), 1, root_identity, WinName::from("root")),
+            snapshot: snapshot.clone(),
+            layout: empty_layout(snapshot.root),
+            events: event_rx,
+            watcher_events,
+            scan: None,
+            watcher: None,
+            scanning: false,
+            paused: false,
+            files_seen: 3,
+            treemap_state,
+            pending_rescan: false,
+            last_watch_event: None,
+            errors: Vec::new(),
+            volume_usage: None,
+            pending_navigation: None,
+        };
+        let origin_focus = egui::Id::new("obscured-origin");
+        let target = ContextTarget {
+            scan_id: snapshot.scan_id,
+            generation: snapshot.generation,
+            node_id: NodeId(2),
+            identity: snapshot.node(NodeId(2)).unwrap().identity.clone(),
+            path: PathBuf::from(r"C:\A\leaf"),
+            kind: NodeKind::File,
+            root: PathBuf::from(r"C:\"),
+            view_root: NodeId(1),
+            display_name: "leaf".to_owned(),
+            display_size: "1 B".to_owned(),
+            origin_focus,
+        };
+        let tactical_arc = TacticalArcState::new(target, viewport.center(), viewport, true)
+            .expect("test viewport fits tactical arc");
+        let (fileop_tx, fileop_rx) = bounded(1);
+        let (volume_refresh_tx, volume_refresh_rx) = bounded(1);
+        let mut overlays = OverlayCoordinator::default();
+        overlays.open_transient(TransientOverlay::TacticalArc, Some(origin_focus));
+        context.memory_mut(|memory| memory.request_focus(origin_focus));
+        VoidspaceApp {
+            typography: theme::install(context),
+            volume_switcher: VolumeSwitcherState::default(),
+            tabs: vec![tab],
+            active_tab: 0,
+            next_scan_id: 2,
+            scope_text: r"C:\".to_owned(),
+            filter_text: String::new(),
+            filter: None,
+            filter_error: None,
+            compact_filter_draft: String::new(),
+            compact_filter_prior: String::new(),
+            details_drawer: false,
+            toast: None,
+            fileop_dialog: None,
+            fileop_tx,
+            fileop_rx,
+            fileop_running: false,
+            volume_refresh_tx,
+            volume_refresh_rx,
+            available_volumes: Vec::new(),
+            volume_refresh_started_at: Instant::now(),
+            volume_refresh_in_flight: true,
+            volume_discovery_complete: true,
+            volume_discovery_error: None,
+            volume_picker_visible: false,
+            overlays,
+            tactical_arc: Some(tactical_arc),
+            volume_labels: VolumeDisplayRegistry::default(),
+            status_detail_modules: Vec::new(),
+            ui_frame_diagnostic: crate::diagnostics::UiFrameDiagnostic::default(),
+            settings: Settings::default(),
+        }
+    }
+
+    fn key_event(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: Some(key),
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    fn run_frame(app: &mut VoidspaceApp, context: &egui::Context, input: egui::RawInput) {
+        let mut frame = eframe::Frame::_new_kittest();
+        let mut output = context.run_ui(input, |ui| app.ui(ui, &mut frame));
+        output.textures_delta.clear();
+    }
+
+    #[test]
+    fn active_arc_resolves_tab_before_underlay_and_defers_dismiss_until_after_underlay() {
+        let context = egui::Context::default();
+        let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 720.0));
+        let mut app = app_with_open_keyboard_arc(&context, viewport);
+        let input = |events| egui::RawInput {
+            screen_rect: Some(viewport),
+            events,
+            ..Default::default()
+        };
+
+        run_frame(&mut app, &context, input(Vec::new()));
+        run_frame(
+            &mut app,
+            &context,
+            input(vec![
+                key_event(egui::Key::ArrowLeft, egui::Modifiers::ALT),
+                key_event(egui::Key::Tab, egui::Modifiers::NONE),
+            ]),
+        );
+
+        assert_eq!(
+            app.tabs[0].treemap_state.view_path.as_slice(),
+            &[NodeId(0), NodeId(1)],
+            "Alt+Left must remain inert while the arc owns the underlay"
+        );
+        assert_eq!(
+            context.memory(|memory| memory.focused()),
+            Some(egui::Id::new("tactical-action").with(1))
+        );
+        assert_eq!(
+            app.overlays.transient(),
+            Some(TransientOverlay::TacticalArc)
+        );
+
+        let click = egui::pos2(120.0, 120.0);
+        run_frame(
+            &mut app,
+            &context,
+            input(vec![
+                egui::Event::PointerMoved(click),
+                egui::Event::PointerButton {
+                    pos: click,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::PointerButton {
+                    pos: click,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]),
+        );
+        assert_eq!(
+            app.tabs[0].treemap_state.view_path.as_slice(),
+            &[NodeId(0), NodeId(1)],
+            "the pending outside-click dismissal must not re-enable the underlay"
+        );
+        assert_eq!(app.overlays.transient(), None);
     }
 }

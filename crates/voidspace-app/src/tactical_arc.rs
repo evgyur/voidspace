@@ -83,6 +83,7 @@ mod primitives {
         geometry_scale: f32,
     ) -> ActiveSectorStyle {
         let intensity = intensity.clamp(0.0, 1.0);
+        let label_intensity = (intensity * 8.0).round() / 8.0;
         let geometry_scale = geometry_scale.max(0.0);
         let fill = Color32::from_rgb(semantic_color.r(), semantic_color.g(), semantic_color.b());
         let bloom_alpha = (72.0 + 112.0 * intensity).round() as u8;
@@ -93,7 +94,7 @@ mod primitives {
             inner_stroke: Stroke::new(2.0 * geometry_scale, fill),
             outer_bloom: Stroke::new((2.0 + 3.0 * intensity) * geometry_scale, bloom_color),
             label_color: ACTIVE_LABEL_INK,
-            label_scale: 1.0 + 0.095 * intensity,
+            label_scale: 1.0 + 0.095 * label_intensity,
         }
     }
 
@@ -219,36 +220,32 @@ pub enum TacticalArcOutcome {
 #[derive(Clone, Copy)]
 struct SectorSpec {
     action: TacticalAction,
-    short: &'static str,
+    compact_label: &'static str,
     label: &'static str,
-    accessible_name: &'static str,
-    shortcut: &'static str,
+    accessible_label: &'static str,
     color: Color32,
 }
 
 const SECTORS: [SectorSpec; 3] = [
     SectorSpec {
         action: TacticalAction::OpenInExplorer,
-        short: "OPEN",
+        compact_label: "1  OPEN",
         label: "OPEN IN EXPLORER",
-        accessible_name: "Open in Explorer",
-        shortcut: "1",
+        accessible_label: "Open in Explorer · key 1 to select · Enter to execute",
         color: ACTIVE_CYAN,
     },
     SectorSpec {
         action: TacticalAction::Recycle,
-        short: "BIN",
+        compact_label: "2  BIN",
         label: "MOVE TO RECYCLE BIN",
-        accessible_name: "Move to Recycle Bin",
-        shortcut: "2",
+        accessible_label: "Move to Recycle Bin · key 2 to select · Enter to execute",
         color: ACTIVE_LIME,
     },
     SectorSpec {
         action: TacticalAction::DeletePermanently,
-        short: "VOID",
+        compact_label: "3  VOID",
         label: "DELETE WITHOUT RECOVERY",
-        accessible_name: "Delete without recovery",
-        shortcut: "3",
+        accessible_label: "Delete without recovery · key 3 to select · Enter to execute",
         color: ACTIVE_MAGENTA,
     },
 ];
@@ -261,12 +258,22 @@ impl TacticalAction {
         SECTORS[self.index()].label
     }
 
+    #[cfg(test)]
     pub const fn accessible_name(self) -> &'static str {
-        SECTORS[self.index()].accessible_name
+        match self {
+            Self::OpenInExplorer => "Open in Explorer",
+            Self::Recycle => "Move to Recycle Bin",
+            Self::DeletePermanently => "Delete without recovery",
+        }
     }
 
+    #[cfg(test)]
     pub const fn keyboard_hint(self) -> &'static str {
-        SECTORS[self.index()].shortcut
+        match self {
+            Self::OpenInExplorer => "1",
+            Self::Recycle => "2",
+            Self::DeletePermanently => "3",
+        }
     }
 
     const fn index(self) -> usize {
@@ -502,6 +509,7 @@ fn target_path_anchors(target: &ContextTarget, path: &str) -> Option<(String, St
 fn fit_target_plate_text(
     painter: &egui::Painter,
     target: &ContextTarget,
+    full_path: &str,
     plate: Rect,
     scale: f32,
     fonts: &TargetPlateFonts,
@@ -526,10 +534,9 @@ fn fit_target_plate_text(
             .x
     })?;
 
-    let path = target.path.to_string_lossy();
-    let (prefix, suffix) = target_path_anchors(target, &path)?;
+    let (prefix, suffix) = target_path_anchors(target, full_path)?;
     let fitted_path =
-        primitives::middle_ellipsis(&path, &prefix, &suffix, content_width, |value| {
+        primitives::middle_ellipsis(full_path, &prefix, &suffix, content_width, |value| {
             painter
                 .layout_no_wrap(value.to_owned(), fonts.small.clone(), Color32::WHITE)
                 .size()
@@ -547,14 +554,42 @@ fn target_plate_response_id(target: &ContextTarget) -> Id {
     Id::new("tactical-target-plate").with((target.scan_id, target.node_id, target.generation))
 }
 
-fn target_plate_description(target: &ContextTarget, action: Option<&SectorSpec>) -> String {
+fn target_plate_description(
+    target: &ContextTarget,
+    path: &str,
+    action: Option<&SectorSpec>,
+) -> String {
     format!(
         "Target size {}; name {}; path {}; action {}",
         target.display_size,
         target.display_name,
-        target.path.display(),
+        path,
         action.map_or("SELECT COMMAND", |sector| sector.action.label())
     )
+}
+
+#[derive(Clone, Debug)]
+struct TargetSemantics {
+    path: String,
+    descriptions: [String; 4],
+}
+
+impl TargetSemantics {
+    fn new(target: &ContextTarget) -> Self {
+        let path = target.path.display().to_string();
+        let descriptions = std::array::from_fn(|index| {
+            target_plate_description(
+                target,
+                &path,
+                index.checked_sub(1).map(|index| &SECTORS[index]),
+            )
+        });
+        Self { path, descriptions }
+    }
+
+    fn description(&self, action: Option<TacticalAction>) -> &str {
+        &self.descriptions[action.map_or(0, |action| action.index() + 1)]
+    }
 }
 
 #[cfg(windows)]
@@ -594,16 +629,44 @@ fn animation_repaint_after(
 
 #[derive(Clone, Debug)]
 pub struct TacticalArcState {
-    pub target: ContextTarget,
+    target: ContextTarget,
     pub geometry: TacticalArcGeometry,
     keyboard_index: Option<usize>,
+    focus_slot: Option<ModalFocusSlot>,
+    focus_request_pending: bool,
     pointer_hovered_action: Option<TacticalAction>,
     pointer_beat_started_at: Option<f64>,
     motion_enabled: bool,
     armed: bool,
+    target_semantics: TargetSemantics,
     target_plate_text_cache: Option<TargetPlateTextCache>,
     #[cfg(test)]
     target_plate_fit_count: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ModalFocusSlot {
+    Action(usize),
+    Plate,
+}
+
+impl ModalFocusSlot {
+    const COUNT: usize = 4;
+
+    fn index(self) -> usize {
+        match self {
+            Self::Action(index) => index,
+            Self::Plate => 3,
+        }
+    }
+
+    fn from_index(index: usize) -> Self {
+        if index == 3 {
+            Self::Plate
+        } else {
+            Self::Action(index)
+        }
+    }
 }
 
 impl TacticalArcState {
@@ -641,18 +704,69 @@ impl TacticalArcState {
         query: impl FnOnce() -> Option<bool>,
     ) -> Option<Self> {
         let geometry = TacticalArcGeometry::fit(pointer, work_area, 1.0)?;
+        let target_semantics = TargetSemantics::new(&target);
         Some(Self {
             target,
             geometry,
             keyboard_index: keyboard_open.then_some(0),
+            focus_slot: keyboard_open.then_some(ModalFocusSlot::Action(0)),
+            focus_request_pending: keyboard_open,
             pointer_hovered_action: None,
             pointer_beat_started_at: None,
             motion_enabled: query().unwrap_or(false),
             armed: false,
+            target_semantics,
             target_plate_text_cache: None,
             #[cfg(test)]
             target_plate_fit_count: 0,
         })
+    }
+
+    pub fn target(&self) -> &ContextTarget {
+        &self.target
+    }
+
+    pub fn into_target(self) -> ContextTarget {
+        self.target
+    }
+
+    fn action_response_id(index: usize) -> Id {
+        Id::new("tactical-action").with(index)
+    }
+
+    fn focus_id(&self, slot: ModalFocusSlot) -> Id {
+        match slot {
+            ModalFocusSlot::Action(index) => Self::action_response_id(index),
+            ModalFocusSlot::Plate => target_plate_response_id(&self.target),
+        }
+    }
+
+    fn queue_focus(&mut self, slot: ModalFocusSlot) {
+        self.focus_slot = Some(slot);
+        self.focus_request_pending = true;
+    }
+
+    fn cycle_focus(&mut self, forward: bool) {
+        let current = self.focus_slot.unwrap_or(if forward {
+            ModalFocusSlot::Action(0)
+        } else {
+            ModalFocusSlot::Plate
+        });
+        let next = if forward {
+            (current.index() + 1) % ModalFocusSlot::COUNT
+        } else {
+            (current.index() + ModalFocusSlot::COUNT - 1) % ModalFocusSlot::COUNT
+        };
+        let slot = ModalFocusSlot::from_index(next);
+        if let ModalFocusSlot::Action(index) = slot {
+            self.keyboard_index = Some(index);
+        }
+        self.queue_focus(slot);
+    }
+
+    fn select_keyboard_action(&mut self, index: usize) {
+        self.keyboard_index = Some(index);
+        self.queue_focus(ModalFocusSlot::Action(index));
     }
 
     fn update_pointer_hover(&mut self, hovered: Option<TacticalAction>, now: f64) {
@@ -695,15 +809,118 @@ impl TacticalArcState {
         {
             self.target_plate_fit_count += 1;
         }
-        self.target_plate_text_cache =
-            fit_target_plate_text(painter, &self.target, plate, geometry_scale, &fonts)
-                .map(|text| TargetPlateTextCache { key, text });
+        self.target_plate_text_cache = fit_target_plate_text(
+            painter,
+            &self.target,
+            &self.target_semantics.path,
+            plate,
+            geometry_scale,
+            &fonts,
+        )
+        .map(|text| TargetPlateTextCache { key, text });
         self.target_plate_text_cache.is_some()
     }
 
-    pub fn show(&mut self, context: &egui::Context, font: FontId) -> Option<TacticalArcOutcome> {
-        let mut plate_text_fit_failed = false;
+    pub fn resolve_input(&mut self, context: &egui::Context) -> Option<TacticalArcOutcome> {
         let opening_frame = !self.armed;
+        let geometry = self.geometry;
+        let pointer = context.pointer_hover_pos();
+        let hovered = pointer.and_then(|position| geometry.hit_test(position));
+        let now = context.input(|input| input.time);
+        self.update_pointer_hover(hovered, now);
+        let focused = context.memory(|memory| memory.focused());
+        if let Some(slot) = (0..ModalFocusSlot::COUNT)
+            .map(ModalFocusSlot::from_index)
+            .find(|slot| Some(self.focus_id(*slot)) == focused)
+        {
+            self.focus_slot = Some(slot);
+        } else if !self.focus_request_pending
+            && focused.is_some()
+            && let Some(slot) = self.focus_slot
+        {
+            self.queue_focus(slot);
+        }
+
+        let (
+            secondary_clicked,
+            primary_clicked,
+            interact_pos,
+            action_forward,
+            action_backward,
+            tab_forward,
+            tab_backward,
+            number,
+            enter,
+            escape,
+        ) = context.input_mut(|input| {
+            let action_forward = input.consume_key(egui::Modifiers::NONE, Key::ArrowDown)
+                || input.consume_key(egui::Modifiers::NONE, Key::ArrowRight);
+            let action_backward = input.consume_key(egui::Modifiers::NONE, Key::ArrowUp)
+                || input.consume_key(egui::Modifiers::NONE, Key::ArrowLeft);
+            let tab_backward = input.consume_key(egui::Modifiers::SHIFT, Key::Tab);
+            let tab_forward = input.consume_key(egui::Modifiers::NONE, Key::Tab);
+            let number = if input.consume_key(egui::Modifiers::NONE, Key::Num1) {
+                Some(0)
+            } else if input.consume_key(egui::Modifiers::NONE, Key::Num2) {
+                Some(1)
+            } else if input.consume_key(egui::Modifiers::NONE, Key::Num3) {
+                Some(2)
+            } else {
+                None
+            };
+            (
+                input.pointer.secondary_clicked(),
+                input.pointer.primary_clicked(),
+                input.pointer.interact_pos(),
+                action_forward,
+                action_backward,
+                tab_forward,
+                tab_backward,
+                number,
+                input.consume_key(egui::Modifiers::NONE, Key::Enter),
+                input.consume_key(egui::Modifiers::NONE, Key::Escape),
+            )
+        });
+
+        if tab_forward {
+            self.cycle_focus(true);
+        } else if tab_backward {
+            self.cycle_focus(false);
+        }
+        if action_forward {
+            let index = self
+                .keyboard_index
+                .map_or(0, |index| (index + 1) % SECTORS.len());
+            self.select_keyboard_action(index);
+        } else if action_backward {
+            let index = self.keyboard_index.map_or(SECTORS.len() - 1, |index| {
+                (index + SECTORS.len() - 1) % SECTORS.len()
+            });
+            self.select_keyboard_action(index);
+        }
+        if let Some(index) = number {
+            self.select_keyboard_action(index);
+        }
+
+        let mut chosen = escape.then_some(TacticalArcOutcome::Dismiss);
+        if secondary_clicked && !opening_frame {
+            chosen = Some(TacticalArcOutcome::Dismiss);
+        }
+        if primary_clicked && let Some(pointer) = interact_pos {
+            chosen = Some(
+                geometry
+                    .hit_test(pointer)
+                    .map_or(TacticalArcOutcome::Dismiss, TacticalArcOutcome::Action),
+            );
+        }
+        if enter && let Some(index) = self.keyboard_index {
+            chosen = Some(TacticalArcOutcome::Action(SECTORS[index].action));
+        }
+        chosen
+    }
+
+    pub fn paint(&mut self, context: &egui::Context, font: FontId) -> Option<TacticalArcOutcome> {
+        let mut plate_text_fit_failed = false;
         self.armed = true;
         let geometry = self.geometry;
         let content_rect = context.content_rect();
@@ -711,57 +928,6 @@ impl TacticalArcState {
         let hovered = pointer.and_then(|position| geometry.hit_test(position));
         let now = context.input(|input| input.time);
         self.update_pointer_hover(hovered, now);
-        let chosen = context.input_mut(|input| {
-            let mut chosen = None;
-            if input.pointer.secondary_clicked() && !opening_frame {
-                chosen = Some(TacticalArcOutcome::Dismiss);
-            }
-            if input.pointer.primary_clicked()
-                && let Some(pointer) = input.pointer.interact_pos()
-            {
-                chosen = Some(
-                    geometry
-                        .hit_test(pointer)
-                        .map_or(TacticalArcOutcome::Dismiss, TacticalArcOutcome::Action),
-                );
-            }
-            let forward = input.consume_key(egui::Modifiers::NONE, Key::ArrowDown)
-                || input.consume_key(egui::Modifiers::NONE, Key::ArrowRight)
-                || input.consume_key(egui::Modifiers::NONE, Key::Tab);
-            let backward = input.consume_key(egui::Modifiers::NONE, Key::ArrowUp)
-                || input.consume_key(egui::Modifiers::NONE, Key::ArrowLeft)
-                || input.consume_key(egui::Modifiers::SHIFT, Key::Tab);
-            if forward {
-                self.keyboard_index = Some(
-                    self.keyboard_index
-                        .map_or(0, |index| (index + 1) % SECTORS.len()),
-                );
-            }
-            if backward {
-                self.keyboard_index =
-                    Some(self.keyboard_index.map_or(SECTORS.len() - 1, |index| {
-                        (index + SECTORS.len() - 1) % SECTORS.len()
-                    }));
-            }
-            if input.consume_key(egui::Modifiers::NONE, Key::Num1) {
-                self.keyboard_index = Some(0);
-            }
-            if input.consume_key(egui::Modifiers::NONE, Key::Num2) {
-                self.keyboard_index = Some(1);
-            }
-            if input.consume_key(egui::Modifiers::NONE, Key::Num3) {
-                self.keyboard_index = Some(2);
-            }
-            if input.consume_key(egui::Modifiers::NONE, Key::Enter)
-                && let Some(index) = self.keyboard_index
-            {
-                chosen = Some(TacticalArcOutcome::Action(SECTORS[index].action));
-            }
-            chosen
-        });
-        if chosen.is_some() {
-            return chosen;
-        }
         let visual_active_action = self.visual_active_action();
         let pointer_beat_intensity = if self.motion_enabled && hovered.is_some() {
             self.pointer_beat_started_at.map_or(0.0, |started_at| {
@@ -865,24 +1031,26 @@ impl TacticalArcState {
                 painter.text(
                     action_center,
                     Align2::CENTER_CENTER,
-                    format!("{}  {}", sector.shortcut, sector.short),
+                    sector.compact_label,
                     label_font,
                     label_color,
                 );
                 let action_response = ui.interact(
                     Rect::from_center_size(action_center, Vec2::splat(56.0 * draw_geometry.scale)),
-                    Id::new("tactical-action").with(index),
+                    Self::action_response_id(index),
                     Sense::click(),
                 );
+                if self.focus_request_pending
+                    && self.focus_slot == Some(ModalFocusSlot::Action(index))
+                {
+                    action_response.request_focus();
+                    self.focus_request_pending = false;
+                }
                 action_response.widget_info(|| {
                     egui::WidgetInfo::labeled(
                         egui::WidgetType::Button,
                         true,
-                        format!(
-                            "{} · key {} to select · Enter to execute",
-                            sector.action.accessible_name(),
-                            sector.action.keyboard_hint()
-                        ),
+                        sector.accessible_label,
                     )
                 });
             }
@@ -1001,11 +1169,20 @@ impl TacticalArcState {
                 target_plate_response_id(&self.target),
                 Sense::focusable_noninteractive(),
             );
-            let description = target_plate_description(&self.target, selected);
+            if self.focus_request_pending && self.focus_slot == Some(ModalFocusSlot::Plate) {
+                plate_response.request_focus();
+                self.focus_request_pending = false;
+            }
+            let description = self
+                .target_semantics
+                .description(selected.map(|sector| sector.action));
             plate_response.widget_info(|| {
-                egui::WidgetInfo::labeled(egui::WidgetType::Window, true, &description)
+                egui::WidgetInfo::labeled(egui::WidgetType::Window, true, description)
             });
-            if plate_response.hovered() || plate_response.has_focus() {
+            if plate_response.hovered()
+                || plate_response.has_focus()
+                || self.focus_slot == Some(ModalFocusSlot::Plate)
+            {
                 egui::Tooltip::always_open(
                     ui.ctx().clone(),
                     plate_response.layer_id,
@@ -1015,7 +1192,7 @@ impl TacticalArcState {
                 .show(|ui| {
                     ui.label(&self.target.display_size);
                     ui.label(&self.target.display_name);
-                    ui.label(self.target.path.display().to_string());
+                    ui.label(&self.target_semantics.path);
                     ui.label(selected.map_or("SELECT COMMAND", |sector| sector.action.label()));
                 });
             }
@@ -1024,6 +1201,12 @@ impl TacticalArcState {
             return Some(TacticalArcOutcome::Dismiss);
         }
         None
+    }
+
+    #[cfg(test)]
+    fn show(&mut self, context: &egui::Context, font: FontId) -> Option<TacticalArcOutcome> {
+        self.resolve_input(context)
+            .or_else(|| self.paint(context, font))
     }
 }
 
@@ -2390,6 +2573,23 @@ mod tests {
         input
     }
 
+    fn key_input(
+        viewport: Rect,
+        time: f64,
+        key: Key,
+        modifiers: egui::Modifiers,
+    ) -> egui::RawInput {
+        let mut input = raw_input(viewport, time, None);
+        input.events.push(egui::Event::Key {
+            key,
+            physical_key: Some(key),
+            pressed: true,
+            repeat: false,
+            modifiers,
+        });
+        input
+    }
+
     fn has_viewport_scrim(output: &egui::FullOutput, viewport: Rect) -> bool {
         leaf_shapes(output).iter().any(
             |shape| matches!(shape, Shape::Rect(rect) if rect.fill == MODAL_SCRIM && rect.rect == viewport),
@@ -2831,6 +3031,11 @@ mod tests {
                 .map(|(id, node)| (*id, node.label().expect("plate description").to_owned()))
                 .expect("plate Window node")
         };
+        let mut neutral = context.run_ui(raw_input(viewport, 9.0, None), |ui| {
+            arc.show(ui.ctx(), FontId::monospace(9.0));
+        });
+        let neutral_node = plate_node(&neutral);
+        neutral.textures_delta.clear();
         let mut baseline = context.run_ui(raw_input(viewport, 10.0, Some(pointer)), |ui| {
             arc.show(ui.ctx(), FontId::monospace(9.0));
         });
@@ -2848,9 +3053,140 @@ mod tests {
         );
         let peak_node = plate_node(&peak);
         peak.textures_delta.clear();
+        assert_eq!(neutral_node.0, baseline_node.0);
+        assert!(neutral_node.1.contains("SELECT COMMAND"));
+        assert_ne!(neutral_node.1, baseline_node.1);
         assert_eq!(peak_node, baseline_node);
         assert!(peak_node.1.contains("DELETE WITHOUT RECOVERY"));
         assert!(!peak_node.1.contains("1.095"));
         assert!(!peak_node.1.contains("pulse"));
+    }
+
+    #[test]
+    fn keyboard_open_enters_modal_focus_and_tab_wraps_across_four_controls() {
+        let context = egui::Context::default();
+        let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 720.0));
+        let mut arc = arc_with_motion_query(|| Some(false), true);
+        let action_id = |index| Id::new("tactical-action").with(index);
+        let plate_id = target_plate_response_id(&arc.target);
+        let origin_id = arc.target.origin_focus;
+        context.memory_mut(|memory| memory.request_focus(origin_id));
+
+        let mut opening = context.run_ui(raw_input(viewport, 1.0, None), |ui| {
+            assert_eq!(arc.show(ui.ctx(), FontId::monospace(9.0)), None);
+        });
+        opening.textures_delta.clear();
+        assert_eq!(
+            context.memory(|memory| memory.focused()),
+            Some(action_id(0))
+        );
+        assert_ne!(context.memory(|memory| memory.focused()), Some(origin_id));
+        assert!(
+            !arc.focus_request_pending,
+            "initial focus request must be one-shot"
+        );
+
+        for (frame, expected) in [
+            (2.0, action_id(1)),
+            (3.0, action_id(2)),
+            (4.0, plate_id),
+            (5.0, action_id(0)),
+        ] {
+            let mut output = context.run_ui(
+                key_input(viewport, frame, Key::Tab, egui::Modifiers::NONE),
+                |ui| {
+                    assert_eq!(arc.show(ui.ctx(), FontId::monospace(9.0)), None);
+                },
+            );
+            output.textures_delta.clear();
+            assert_eq!(context.memory(|memory| memory.focused()), Some(expected));
+        }
+
+        let mut backward = context.run_ui(
+            key_input(viewport, 6.0, Key::Tab, egui::Modifiers::SHIFT),
+            |ui| {
+                assert_eq!(arc.show(ui.ctx(), FontId::monospace(9.0)), None);
+            },
+        );
+        backward.textures_delta.clear();
+        assert_eq!(context.memory(|memory| memory.focused()), Some(plate_id));
+    }
+
+    #[test]
+    fn focused_plate_tooltip_keeps_full_path_and_enter_uses_last_logical_action() {
+        let context = egui::Context::default();
+        let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 720.0));
+        let mut arc = arc_with_motion_query(|| Some(false), true);
+        let full_path = arc.target.path.display().to_string();
+
+        let mut opening = context.run_ui(raw_input(viewport, 1.0, None), |ui| {
+            arc.show(ui.ctx(), FontId::monospace(9.0));
+        });
+        opening.textures_delta.clear();
+        for frame in 2..=4 {
+            let mut output = context.run_ui(
+                key_input(viewport, f64::from(frame), Key::Tab, egui::Modifiers::NONE),
+                |ui| {
+                    assert_eq!(arc.show(ui.ctx(), FontId::monospace(9.0)), None);
+                },
+            );
+            output.textures_delta.clear();
+        }
+
+        let mut tooltip = context.run_ui(raw_input(viewport, 4.5, None), |ui| {
+            assert_eq!(arc.show(ui.ctx(), FontId::monospace(9.0)), None);
+        });
+        let occurrences = rendered_text_shapes(&tooltip)
+            .iter()
+            .filter(|shape| shape.galley.text() == full_path)
+            .count();
+        tooltip.textures_delta.clear();
+        assert!(
+            occurrences >= 2,
+            "focused plate must expose the full-path tooltip"
+        );
+
+        let mut outcome = None;
+        let mut enter = context.run_ui(
+            key_input(viewport, 5.0, Key::Enter, egui::Modifiers::NONE),
+            |ui| outcome = arc.show(ui.ctx(), FontId::monospace(9.0)),
+        );
+        enter.textures_delta.clear();
+        assert_eq!(
+            outcome,
+            Some(TacticalArcOutcome::Action(
+                TacticalAction::DeletePermanently
+            ))
+        );
+    }
+
+    #[test]
+    fn full_reactor_cycle_uses_at_most_nine_rendered_label_font_sizes() {
+        let context = egui::Context::default();
+        let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 720.0));
+        let mut arc = arc_with_motion_query(|| Some(true), false);
+        let pointer = arc.geometry.action_center(TacticalAction::Recycle.index());
+        let mut sizes = Vec::<f32>::new();
+
+        for sample in 0..=1024 {
+            let phase = sample as f32 / 1024.0;
+            let time = 10.0 + f64::from(phase * REACTOR_BEAT_SECONDS);
+            let mut output = context.run_ui(raw_input(viewport, time, Some(pointer)), |ui| {
+                arc.show(ui.ctx(), FontId::monospace(9.0));
+            });
+            let text = rendered_text_shapes(&output);
+            let size = rendered_font_size(rendered_text(&text, "2  BIN"));
+            if !sizes.contains(&size) {
+                sizes.push(size);
+            }
+            output.textures_delta.clear();
+        }
+
+        assert!(
+            sizes.len() <= 9,
+            "unbounded rendered font variants: {sizes:?}"
+        );
+        assert!(sizes.contains(&9.0));
+        assert!(sizes.contains(&(9.0 * 1.095)));
     }
 }
