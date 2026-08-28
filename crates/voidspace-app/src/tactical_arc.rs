@@ -13,18 +13,22 @@ const RAIL_WIDTH: f32 = 152.0;
 const RAIL_HEIGHT: f32 = 44.0;
 const SAFE_MARGIN: f32 = 8.0;
 
-#[allow(dead_code)] // Staged primitives are consumed by the target-plate and hover slices.
 mod primitives {
     use egui::{Color32, Stroke};
     use unicode_segmentation::UnicodeSegmentation;
 
+    // Remove each staging allowance as the target-plate and hover slices consume the item.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) const REACTOR_BEAT_SECONDS: f32 = 1.35;
     pub(super) const ACTIVE_CYAN: Color32 = Color32::from_rgb(0x1e, 0xcd, 0xe2);
     pub(super) const ACTIVE_LIME: Color32 = Color32::from_rgb(0xbd, 0xff, 0x3e);
     pub(super) const ACTIVE_MAGENTA: Color32 = Color32::from_rgb(0xff, 0x49, 0xbc);
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) const ACTIVE_LABEL_INK: Color32 = Color32::from_rgb(0x07, 0x09, 0x0a);
+    #[cfg_attr(not(test), allow(dead_code))]
     const ELLIPSIS: &str = "…";
 
+    #[cfg_attr(not(test), allow(dead_code))]
     #[derive(Clone, Copy, Debug, PartialEq)]
     pub(super) struct ActiveSectorStyle {
         pub(super) fill: Color32,
@@ -34,6 +38,7 @@ mod primitives {
         pub(super) label_scale: f32,
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn reactor_beat(elapsed_seconds: f32) -> f32 {
         const KEYFRAMES: [(f32, f32); 6] = [
             (0.0, 0.0),
@@ -57,6 +62,7 @@ mod primitives {
         0.0
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn active_sector_style(
         semantic_color: Color32,
         intensity: f32,
@@ -77,6 +83,7 @@ mod primitives {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn end_ellipsis<F>(
         value: &str,
         maximum_width: f32,
@@ -104,6 +111,7 @@ mod primitives {
         None
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn middle_ellipsis<F>(
         value: &str,
         preserved_prefix: &str,
@@ -128,20 +136,31 @@ mod primitives {
         }
 
         let optional_count = graphemes.len() - prefix.len() - suffix.len();
-        for retained_count in (0..optional_count).rev() {
-            for left_count in (0..=retained_count).rev() {
-                let right_count = retained_count - left_count;
-                let left_end = prefix.len() + left_count;
-                let right_start = graphemes.len() - suffix.len() - right_count;
-                let mut candidate = graphemes[..left_end].concat();
-                candidate.push_str(ELLIPSIS);
-                candidate.extend(graphemes[right_start..].iter().copied());
-                if measure(&candidate) <= maximum_width {
-                    return Some(candidate);
-                }
+        if optional_count == 0 {
+            return None;
+        }
+
+        let retained_count = optional_count - 1;
+        let mut left_count = retained_count / 2;
+        let mut right_count = retained_count - left_count;
+        loop {
+            let left_end = prefix.len() + left_count;
+            let right_start = graphemes.len() - suffix.len() - right_count;
+            let mut candidate = graphemes[..left_end].concat();
+            candidate.push_str(ELLIPSIS);
+            candidate.extend(graphemes[right_start..].iter().copied());
+            if measure(&candidate) <= maximum_width {
+                return Some(candidate);
+            }
+            if left_count == 0 && right_count == 0 {
+                return None;
+            }
+            if right_count > left_count {
+                right_count -= 1;
+            } else {
+                left_count -= 1;
             }
         }
-        None
     }
 }
 
@@ -630,6 +649,8 @@ fn truncate(value: &str, maximum: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
     use super::primitives::*;
     use super::*;
     use unicode_segmentation::UnicodeSegmentation;
@@ -775,10 +796,75 @@ mod tests {
         let fitted = middle_ellipsis(path, root, final_component, 12.0, grapheme_width)
             .expect("the root, ellipsis, and final component fit");
 
-        assert_eq!(fitted, "C:\\用…\\報告.txt");
+        assert_eq!(fitted, "C:\\…料\\報告.txt");
         assert!(fitted.starts_with(root));
         assert!(fitted.ends_with(final_component));
         assert!(fitted.graphemes(true).count() <= 12);
+    }
+
+    #[test]
+    fn middle_ellipsis_uses_at_most_linear_measurements_for_long_paths() {
+        let optional = "界".repeat(256);
+        let path = format!("C:\\{optional}\\final.txt");
+        let root = "C:\\";
+        let final_component = "\\final.txt";
+        let maximum_width = grapheme_width(&format!("{root}…{final_component}"));
+        let measurement_count = Cell::new(0);
+
+        let fitted = middle_ellipsis(&path, root, final_component, maximum_width, |candidate| {
+            measurement_count.set(measurement_count.get() + 1);
+            grapheme_width(candidate)
+        })
+        .expect("the mandatory root and final component fit");
+
+        assert_eq!(fitted, format!("{root}…{final_component}"));
+        assert!(
+            measurement_count.get() <= optional.graphemes(true).count() + 1,
+            "{} measurements exceeded the linear bound",
+            measurement_count.get()
+        );
+    }
+
+    #[test]
+    fn middle_ellipsis_respects_non_uniform_measured_widths() {
+        fn non_uniform_width(value: &str) -> f32 {
+            value
+                .graphemes(true)
+                .map(|grapheme| if grapheme == "W" { 4.0 } else { 1.0 })
+                .sum()
+        }
+
+        let narrow_path = "C:\\aaaa\\z.txt";
+        let wide_path = "C:\\WWWW\\z.txt";
+        let root = "C:\\";
+        let final_component = "\\z.txt";
+        let maximum_width = 13.0;
+        assert_eq!(
+            narrow_path.graphemes(true).count(),
+            wide_path.graphemes(true).count()
+        );
+
+        let narrow = middle_ellipsis(
+            narrow_path,
+            root,
+            final_component,
+            maximum_width,
+            non_uniform_width,
+        )
+        .expect("narrow path fits");
+        let wide = middle_ellipsis(
+            wide_path,
+            root,
+            final_component,
+            maximum_width,
+            non_uniform_width,
+        )
+        .expect("wide path fits after measured truncation");
+
+        assert_eq!(narrow, narrow_path);
+        assert!(wide.contains('…'));
+        assert!(wide.graphemes(true).count() < narrow.graphemes(true).count());
+        assert!(non_uniform_width(&wide) <= maximum_width);
     }
 
     #[test]
