@@ -3,8 +3,34 @@ $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $packageTarget = Join-Path $repo 'target\package-build'
 $dist = Join-Path $repo 'dist'
-$stage = Join-Path $dist 'Voidspace-0.1.2-windows-x64'
-$archive = Join-Path $dist 'Voidspace-0.1.2-windows-x64.zip'
+
+try {
+    $metadataJson = & cargo metadata --locked --no-deps --format-version 1 --manifest-path (Join-Path $repo 'Cargo.toml')
+    if ($LASTEXITCODE -ne 0) { throw "cargo exited with code $LASTEXITCODE" }
+}
+catch {
+    throw "cargo metadata failed: $($_.Exception.Message)"
+}
+if ([string]::IsNullOrWhiteSpace(($metadataJson -join [Environment]::NewLine))) {
+    throw 'cargo metadata returned no output'
+}
+try {
+    $metadata = ($metadataJson -join [Environment]::NewLine) | ConvertFrom-Json
+}
+catch {
+    throw "cargo metadata returned invalid JSON: $($_.Exception.Message)"
+}
+$appPackages = @($metadata.packages | Where-Object { $_.name -eq 'voidspace-app' })
+if ($appPackages.Count -ne 1) {
+    throw "Expected exactly one voidspace-app package in cargo metadata, found $($appPackages.Count)"
+}
+$version = [string]$appPackages[0].version
+if ([string]::IsNullOrWhiteSpace($version)) {
+    throw 'voidspace-app version is missing from cargo metadata'
+}
+$packageName = "Voidspace-$version-windows-x64"
+$stage = Join-Path $dist $packageName
+$archive = Join-Path $dist "$packageName.zip"
 
 function Remove-WithRetry([string]$Path, [switch]$Recurse) {
     if (-not (Test-Path -LiteralPath $Path)) { return }
@@ -39,11 +65,11 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'font asset verification failed' }
     & cargo fmt --all -- --check
     if ($LASTEXITCODE -ne 0) { throw 'cargo fmt failed' }
-    & cargo clippy --workspace --all-targets -- -D warnings
+    & cargo clippy --locked --workspace --all-targets -- -D warnings
     if ($LASTEXITCODE -ne 0) { throw 'cargo clippy failed' }
-    & cargo test --workspace
+    & cargo test --locked --workspace
     if ($LASTEXITCODE -ne 0) { throw 'cargo test failed' }
-    & cargo build --workspace --release
+    & cargo build --locked --workspace --release
     if ($LASTEXITCODE -ne 0) { throw 'release build failed' }
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'smoke.ps1')
     if ($LASTEXITCODE -ne 0) { throw 'smoke failed' }

@@ -40,4 +40,4 @@ Voidspace запрещает удаление корня диска и reparse/s
 powershell -ExecutionPolicy Bypass -File scripts\package.ps1
 ```
 
-Команда запускает fmt, clippy, все тесты, release build, temp-root smoke и создаёт `dist\Voidspace-0.1.0-windows-x64.zip`.
+Команда запускает fmt, clippy, все тесты, release build, temp-root smoke и создаёт `dist\Voidspace-<version>-windows-x64.zip`.
