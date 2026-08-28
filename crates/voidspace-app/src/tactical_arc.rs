@@ -140,27 +140,35 @@ mod primitives {
             return None;
         }
 
-        let retained_count = optional_count - 1;
-        let mut left_count = retained_count / 2;
-        let mut right_count = retained_count - left_count;
-        loop {
+        let candidate_for = |retained_count: usize| {
+            let left_count = retained_count / 2;
+            let right_count = retained_count - left_count;
             let left_end = prefix.len() + left_count;
             let right_start = graphemes.len() - suffix.len() - right_count;
             let mut candidate = graphemes[..left_end].concat();
             candidate.push_str(ELLIPSIS);
             candidate.extend(graphemes[right_start..].iter().copied());
+            candidate
+        };
+
+        let mut best = candidate_for(0);
+        if measure(&best) > maximum_width {
+            return None;
+        }
+
+        let mut low = 1;
+        let mut high = optional_count - 1;
+        while low <= high {
+            let retained_count = low + (high - low) / 2;
+            let candidate = candidate_for(retained_count);
             if measure(&candidate) <= maximum_width {
-                return Some(candidate);
-            }
-            if left_count == 0 && right_count == 0 {
-                return None;
-            }
-            if right_count > left_count {
-                right_count -= 1;
+                best = candidate;
+                low = retained_count + 1;
             } else {
-                left_count -= 1;
+                high = retained_count - 1;
             }
         }
+        Some(best)
     }
 }
 
@@ -668,6 +676,13 @@ mod tests {
         value.graphemes(true).count() as f32
     }
 
+    fn non_uniform_width(value: &str) -> f32 {
+        value
+            .graphemes(true)
+            .map(|grapheme| if grapheme == "W" { 4.0 } else { 1.0 })
+            .sum()
+    }
+
     fn relative_luminance(color: Color32) -> f32 {
         fn linearize(channel: u8) -> f32 {
             let channel = f32::from(channel) / 255.0;
@@ -803,37 +818,64 @@ mod tests {
     }
 
     #[test]
-    fn middle_ellipsis_uses_at_most_linear_measurements_for_long_paths() {
-        let optional = "界".repeat(256);
+    fn middle_ellipsis_has_logarithmic_measurements_and_subquadratic_measured_volume() {
+        let optional = "界".repeat(4096);
         let path = format!("C:\\{optional}\\final.txt");
         let root = "C:\\";
         let final_component = "\\final.txt";
         let maximum_width = grapheme_width(&format!("{root}…{final_component}"));
         let measurement_count = Cell::new(0);
+        let measured_graphemes = Cell::new(0);
+        let measured_bytes = Cell::new(0);
 
         let fitted = middle_ellipsis(&path, root, final_component, maximum_width, |candidate| {
             measurement_count.set(measurement_count.get() + 1);
-            grapheme_width(candidate)
+            let graphemes = candidate.graphemes(true).count();
+            measured_graphemes.set(measured_graphemes.get() + graphemes);
+            measured_bytes.set(measured_bytes.get() + candidate.len());
+            graphemes as f32
         })
         .expect("the mandatory root and final component fit");
 
         assert_eq!(fitted, format!("{root}…{final_component}"));
+        let optional_count = optional.graphemes(true).count();
+        let logarithmic_probe_bound =
+            usize::BITS as usize - optional_count.leading_zeros() as usize;
+        let invocation_bound = logarithmic_probe_bound + 2;
+        let path_graphemes = path.graphemes(true).count();
         assert!(
-            measurement_count.get() <= optional.graphemes(true).count() + 1,
-            "{} measurements exceeded the linear bound",
-            measurement_count.get()
+            measurement_count.get() <= invocation_bound
+                && measured_graphemes.get() <= invocation_bound * path_graphemes
+                && measured_bytes.get() <= invocation_bound * path.len(),
+            "calls={}, graphemes={}, bytes={} exceeded bounds calls<={invocation_bound}, graphemes<={}, bytes<={}",
+            measurement_count.get(),
+            measured_graphemes.get(),
+            measured_bytes.get(),
+            invocation_bound * path_graphemes,
+            invocation_bound * path.len(),
         );
     }
 
     #[test]
-    fn middle_ellipsis_respects_non_uniform_measured_widths() {
-        fn non_uniform_width(value: &str) -> f32 {
-            value
-                .graphemes(true)
-                .map(|grapheme| if grapheme == "W" { 4.0 } else { 1.0 })
-                .sum()
-        }
+    fn end_ellipsis_respects_non_uniform_measured_widths() {
+        let narrow = "aaaaaa";
+        let wide = "WWWWWW";
+        let maximum_width = 6.0;
+        assert_eq!(narrow.graphemes(true).count(), wide.graphemes(true).count());
 
+        let fitted_narrow = end_ellipsis(narrow, maximum_width, 1, non_uniform_width)
+            .expect("narrow text fits without truncation");
+        let fitted_wide = end_ellipsis(wide, maximum_width, 1, non_uniform_width)
+            .expect("wide text fits after measured truncation");
+
+        assert_eq!(fitted_narrow, narrow);
+        assert_eq!(fitted_wide, "W…");
+        assert!(fitted_wide.graphemes(true).count() < fitted_narrow.graphemes(true).count());
+        assert!(non_uniform_width(&fitted_wide) <= maximum_width);
+    }
+
+    #[test]
+    fn middle_ellipsis_respects_non_uniform_measured_widths() {
         let narrow_path = "C:\\aaaa\\z.txt";
         let wide_path = "C:\\WWWW\\z.txt";
         let root = "C:\\";
