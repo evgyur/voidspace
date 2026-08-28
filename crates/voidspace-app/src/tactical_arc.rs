@@ -747,17 +747,18 @@ impl TacticalArcState {
     }
 
     fn cycle_focus(&mut self, forward: bool) {
-        let current = self.focus_slot.unwrap_or(if forward {
+        let slot = if let Some(current) = self.focus_slot {
+            let next = if forward {
+                (current.index() + 1) % ModalFocusSlot::COUNT
+            } else {
+                (current.index() + ModalFocusSlot::COUNT - 1) % ModalFocusSlot::COUNT
+            };
+            ModalFocusSlot::from_index(next)
+        } else if forward {
             ModalFocusSlot::Action(0)
         } else {
             ModalFocusSlot::Plate
-        });
-        let next = if forward {
-            (current.index() + 1) % ModalFocusSlot::COUNT
-        } else {
-            (current.index() + ModalFocusSlot::COUNT - 1) % ModalFocusSlot::COUNT
         };
-        let slot = ModalFocusSlot::from_index(next);
         if let ModalFocusSlot::Action(index) = slot {
             self.keyboard_index = Some(index);
         }
@@ -3110,6 +3111,75 @@ mod tests {
         );
         backward.textures_delta.clear();
         assert_eq!(context.memory(|memory| memory.focused()), Some(plate_id));
+    }
+
+    #[test]
+    fn pointer_open_first_tab_focuses_explorer_and_enter_executes_it() {
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 720.0));
+        let mut arc = arc_with_motion_query(|| Some(false), false);
+        let explorer_id = Id::new("tactical-action").with(0);
+
+        let mut tab = context.run_ui(
+            key_input(viewport, 1.0, Key::Tab, egui::Modifiers::NONE),
+            |ui| assert_eq!(arc.show(ui.ctx(), FontId::monospace(9.0)), None),
+        );
+        let accesskit_focus = tab
+            .platform_output
+            .accesskit_update
+            .as_ref()
+            .expect("accessibility update")
+            .focus;
+        tab.textures_delta.clear();
+        assert_eq!(arc.focus_slot, Some(ModalFocusSlot::Action(0)));
+        assert_eq!(arc.keyboard_index, Some(0));
+        assert_eq!(context.memory(|memory| memory.focused()), Some(explorer_id));
+        assert_eq!(accesskit_focus, explorer_id.accesskit_id());
+
+        let mut outcome = None;
+        let mut enter = context.run_ui(
+            key_input(viewport, 2.0, Key::Enter, egui::Modifiers::NONE),
+            |ui| outcome = arc.show(ui.ctx(), FontId::monospace(9.0)),
+        );
+        enter.textures_delta.clear();
+        assert_eq!(
+            outcome,
+            Some(TacticalArcOutcome::Action(TacticalAction::OpenInExplorer))
+        );
+    }
+
+    #[test]
+    fn pointer_open_first_shift_tab_focuses_plate_without_selecting_an_action() {
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 720.0));
+        let mut arc = arc_with_motion_query(|| Some(false), false);
+        let plate_id = target_plate_response_id(&arc.target);
+
+        let mut shift_tab = context.run_ui(
+            key_input(viewport, 1.0, Key::Tab, egui::Modifiers::SHIFT),
+            |ui| assert_eq!(arc.show(ui.ctx(), FontId::monospace(9.0)), None),
+        );
+        let accesskit_focus = shift_tab
+            .platform_output
+            .accesskit_update
+            .as_ref()
+            .expect("accessibility update")
+            .focus;
+        shift_tab.textures_delta.clear();
+        assert_eq!(arc.focus_slot, Some(ModalFocusSlot::Plate));
+        assert_eq!(arc.keyboard_index, None);
+        assert_eq!(context.memory(|memory| memory.focused()), Some(plate_id));
+        assert_eq!(accesskit_focus, plate_id.accesskit_id());
+
+        let mut outcome = None;
+        let mut enter = context.run_ui(
+            key_input(viewport, 2.0, Key::Enter, egui::Modifiers::NONE),
+            |ui| outcome = arc.show(ui.ctx(), FontId::monospace(9.0)),
+        );
+        enter.textures_delta.clear();
+        assert_eq!(outcome, None);
     }
 
     #[test]
