@@ -702,7 +702,6 @@ impl TacticalArcState {
     }
 
     pub fn show(&mut self, context: &egui::Context, font: FontId) -> Option<TacticalArcOutcome> {
-        let mut chosen = None;
         let mut plate_text_fit_failed = false;
         let opening_frame = !self.armed;
         self.armed = true;
@@ -712,6 +711,57 @@ impl TacticalArcState {
         let hovered = pointer.and_then(|position| geometry.hit_test(position));
         let now = context.input(|input| input.time);
         self.update_pointer_hover(hovered, now);
+        let chosen = context.input_mut(|input| {
+            let mut chosen = None;
+            if input.pointer.secondary_clicked() && !opening_frame {
+                chosen = Some(TacticalArcOutcome::Dismiss);
+            }
+            if input.pointer.primary_clicked()
+                && let Some(pointer) = input.pointer.interact_pos()
+            {
+                chosen = Some(
+                    geometry
+                        .hit_test(pointer)
+                        .map_or(TacticalArcOutcome::Dismiss, TacticalArcOutcome::Action),
+                );
+            }
+            let forward = input.consume_key(egui::Modifiers::NONE, Key::ArrowDown)
+                || input.consume_key(egui::Modifiers::NONE, Key::ArrowRight)
+                || input.consume_key(egui::Modifiers::NONE, Key::Tab);
+            let backward = input.consume_key(egui::Modifiers::NONE, Key::ArrowUp)
+                || input.consume_key(egui::Modifiers::NONE, Key::ArrowLeft)
+                || input.consume_key(egui::Modifiers::SHIFT, Key::Tab);
+            if forward {
+                self.keyboard_index = Some(
+                    self.keyboard_index
+                        .map_or(0, |index| (index + 1) % SECTORS.len()),
+                );
+            }
+            if backward {
+                self.keyboard_index =
+                    Some(self.keyboard_index.map_or(SECTORS.len() - 1, |index| {
+                        (index + SECTORS.len() - 1) % SECTORS.len()
+                    }));
+            }
+            if input.consume_key(egui::Modifiers::NONE, Key::Num1) {
+                self.keyboard_index = Some(0);
+            }
+            if input.consume_key(egui::Modifiers::NONE, Key::Num2) {
+                self.keyboard_index = Some(1);
+            }
+            if input.consume_key(egui::Modifiers::NONE, Key::Num3) {
+                self.keyboard_index = Some(2);
+            }
+            if input.consume_key(egui::Modifiers::NONE, Key::Enter)
+                && let Some(index) = self.keyboard_index
+            {
+                chosen = Some(TacticalArcOutcome::Action(SECTORS[index].action));
+            }
+            chosen
+        });
+        if chosen.is_some() {
+            return chosen;
+        }
         let visual_active_action = self.visual_active_action();
         let pointer_beat_intensity = if self.motion_enabled && hovered.is_some() {
             self.pointer_beat_started_at.map_or(0.0, |started_at| {
@@ -723,25 +773,23 @@ impl TacticalArcState {
         if let Some(delay) = animation_repaint_after(self.motion_enabled, hovered) {
             context.request_repaint_after(delay);
         }
-        let modal_area = || {
-            egui::Area::new(Id::new("tactical-arc"))
-                .order(egui::Order::Foreground)
-                .sense(Sense::click())
-                .fade_in(false)
-                .fixed_pos(content_rect.min)
-        };
-        if opening_frame {
-            // An egui Area's implicit first sizing pass is non-interactive. Complete that
-            // invisible pass now so the visible modal Area shields this opening frame.
-            modal_area().sizing_pass(true).show(context, |ui| {
-                ui.set_min_size(content_rect.size());
-            });
-        }
-        modal_area().show(context, |ui| {
+        let modal_area = egui::Area::new(Id::new("tactical-arc"))
+            .order(egui::Order::Foreground)
+            .sense(Sense::CLICK)
+            .fade_in(false)
+            .default_size(content_rect.size())
+            .fixed_pos(content_rect.min);
+        modal_area.show(context, |ui| {
             ui.set_min_size(content_rect.size());
-            let (rect, _) = ui.allocate_exact_size(content_rect.size(), Sense::click());
+            let (rect, _) = ui.allocate_exact_size(content_rect.size(), Sense::CLICK);
             ui.set_clip_rect(content_rect);
-            let painter = ui.painter_at(rect);
+            let painter = if ui.is_visible() {
+                ui.painter_at(rect)
+            } else {
+                context
+                    .layer_painter(ui.layer_id())
+                    .with_clip_rect(content_rect)
+            };
             let draw_geometry = geometry_for_area_painter(geometry, rect);
             let center = draw_geometry.center;
             painter.rect_filled(rect, 0.0, MODAL_SCRIM);
@@ -975,54 +1023,7 @@ impl TacticalArcState {
         if plate_text_fit_failed {
             return Some(TacticalArcOutcome::Dismiss);
         }
-
-        context.input_mut(|input| {
-            if input.pointer.secondary_clicked() && !opening_frame {
-                chosen = Some(TacticalArcOutcome::Dismiss);
-            }
-            if input.pointer.primary_clicked()
-                && let Some(pointer) = input.pointer.interact_pos()
-            {
-                chosen = Some(
-                    self.geometry
-                        .hit_test(pointer)
-                        .map_or(TacticalArcOutcome::Dismiss, TacticalArcOutcome::Action),
-                );
-            }
-            let forward = input.consume_key(egui::Modifiers::NONE, Key::ArrowDown)
-                || input.consume_key(egui::Modifiers::NONE, Key::ArrowRight)
-                || input.consume_key(egui::Modifiers::NONE, Key::Tab);
-            let backward = input.consume_key(egui::Modifiers::NONE, Key::ArrowUp)
-                || input.consume_key(egui::Modifiers::NONE, Key::ArrowLeft)
-                || input.consume_key(egui::Modifiers::SHIFT, Key::Tab);
-            if forward {
-                self.keyboard_index = Some(
-                    self.keyboard_index
-                        .map_or(0, |index| (index + 1) % SECTORS.len()),
-                );
-            }
-            if backward {
-                self.keyboard_index =
-                    Some(self.keyboard_index.map_or(SECTORS.len() - 1, |index| {
-                        (index + SECTORS.len() - 1) % SECTORS.len()
-                    }));
-            }
-            if input.consume_key(egui::Modifiers::NONE, Key::Num1) {
-                self.keyboard_index = Some(0);
-            }
-            if input.consume_key(egui::Modifiers::NONE, Key::Num2) {
-                self.keyboard_index = Some(1);
-            }
-            if input.consume_key(egui::Modifiers::NONE, Key::Num3) {
-                self.keyboard_index = Some(2);
-            }
-            if input.consume_key(egui::Modifiers::NONE, Key::Enter)
-                && let Some(index) = self.keyboard_index
-            {
-                chosen = Some(TacticalArcOutcome::Action(SECTORS[index].action));
-            }
-        });
-        chosen
+        None
     }
 }
 
@@ -2091,6 +2092,55 @@ mod tests {
     }
 
     #[test]
+    fn decorative_modal_shields_do_not_enter_keyboard_focus_order() {
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 720.0));
+        let mut arc = arc_with_motion_query(|| Some(false), false);
+
+        let mut output = context.run_ui(raw_input(viewport, 1.0, None), |ui| {
+            arc.show(ui.ctx(), FontId::monospace(9.0));
+        });
+        let update = output
+            .platform_output
+            .accesskit_update
+            .as_ref()
+            .expect("accessibility tree generated");
+        let focusable = update
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.supports_action(egui::accesskit::Action::Focus))
+            .map(|(_, node)| (node.role(), node.label().map(str::to_owned)))
+            .collect::<Vec<_>>();
+        output.textures_delta.clear();
+
+        assert_eq!(
+            focusable
+                .iter()
+                .filter(|(role, _)| *role == egui::accesskit::Role::Button)
+                .count(),
+            SECTORS.len()
+        );
+        assert_eq!(
+            focusable
+                .iter()
+                .filter(|(role, label)| {
+                    *role == egui::accesskit::Role::Window
+                        && label
+                            .as_deref()
+                            .is_some_and(|label| label.contains(r"C:\Data\archive"))
+                })
+                .count(),
+            1
+        );
+        assert_eq!(
+            focusable.len(),
+            SECTORS.len() + 1,
+            "only the sector buttons and target plate may receive keyboard focus: {focusable:?}"
+        );
+    }
+
+    #[test]
     fn command_band_is_neutral_until_a_full_semantic_action_is_selected() {
         fn command_shape(
             pointer: Option<Pos2>,
@@ -2171,27 +2221,28 @@ mod tests {
     }
 
     #[test]
-    fn primary_plate_click_dismisses_but_primary_sector_click_executes() {
-        fn click_outcome(use_plate: bool) -> Option<TacticalArcOutcome> {
+    fn first_frame_primary_outside_dismisses_and_sector_click_executes_before_paint() {
+        fn click_result(use_outside: bool) -> (Option<TacticalArcOutcome>, egui::FullOutput, Rect) {
             let context = egui::Context::default();
             let work_area = Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 720.0));
             let target = target_fixture("9.7 GB", "archive", r"C:\Data\archive", r"C:\");
-            let mut arc = TacticalArcState::new(target, Pos2::new(320.0, 360.0), work_area, false)
-                .expect("target plate fits");
-            let pointer = if use_plate {
-                arc.geometry.target_plate_rect().center()
+            let mut arc = TacticalArcState::new_with_motion_query(
+                target,
+                Pos2::new(320.0, 360.0),
+                work_area,
+                false,
+                || Some(true),
+            )
+            .expect("target plate fits");
+            let pointer = if use_outside {
+                Pos2::new(1200.0, 40.0)
             } else {
                 arc.geometry.action_center(TacticalAction::Recycle.index())
             };
-            let base_input = egui::RawInput {
+            let mut input = egui::RawInput {
                 screen_rect: Some(work_area),
                 ..Default::default()
             };
-            let mut first_output = context.run_ui(base_input.clone(), |ui| {
-                arc.show(ui.ctx(), FontId::monospace(9.0));
-            });
-            first_output.textures_delta.clear();
-            let mut input = base_input;
             input.events.extend([
                 egui::Event::PointerMoved(pointer),
                 egui::Event::PointerButton {
@@ -2212,14 +2263,23 @@ mod tests {
                 outcome = arc.show(ui.ctx(), FontId::monospace(9.0));
             });
             output.textures_delta.clear();
-            outcome
+            (outcome, output, work_area)
         }
 
-        assert_eq!(click_outcome(true), Some(TacticalArcOutcome::Dismiss));
+        let (outside_outcome, outside_output, viewport) = click_result(true);
+        assert_eq!(outside_outcome, Some(TacticalArcOutcome::Dismiss));
+        assert!(!leaf_shapes(&outside_output).iter().any(
+            |shape| matches!(shape, Shape::Rect(rect) if rect.fill == MODAL_SCRIM && rect.rect == viewport)
+        ));
+
+        let (sector_outcome, sector_output, viewport) = click_result(false);
         assert_eq!(
-            click_outcome(false),
+            sector_outcome,
             Some(TacticalArcOutcome::Action(TacticalAction::Recycle))
         );
+        assert!(!leaf_shapes(&sector_output).iter().any(
+            |shape| matches!(shape, Shape::Rect(rect) if rect.fill == MODAL_SCRIM && rect.rect == viewport)
+        ));
     }
 
     #[test]
@@ -2304,6 +2364,94 @@ mod tests {
             input.events.push(egui::Event::PointerMoved(pointer));
         }
         input
+    }
+
+    fn pointer_click_input(
+        viewport: Rect,
+        time: f64,
+        pointer: Pos2,
+        button: egui::PointerButton,
+    ) -> egui::RawInput {
+        let mut input = raw_input(viewport, time, Some(pointer));
+        input.events.extend([
+            egui::Event::PointerButton {
+                pos: pointer,
+                button,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+            egui::Event::PointerButton {
+                pos: pointer,
+                button,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]);
+        input
+    }
+
+    fn has_viewport_scrim(output: &egui::FullOutput, viewport: Rect) -> bool {
+        leaf_shapes(output).iter().any(
+            |shape| matches!(shape, Shape::Rect(rect) if rect.fill == MODAL_SCRIM && rect.rect == viewport),
+        )
+    }
+
+    #[test]
+    fn opening_secondary_is_ignored_but_next_secondary_dismisses_before_paint() {
+        let context = egui::Context::default();
+        let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 720.0));
+        let mut arc = arc_with_motion_query(|| Some(false), false);
+        let pointer = Pos2::new(1200.0, 40.0);
+
+        let mut opening_outcome = None;
+        let mut opening_output = context.run_ui(
+            pointer_click_input(viewport, 1.0, pointer, egui::PointerButton::Secondary),
+            |ui| {
+                opening_outcome = arc.show(ui.ctx(), FontId::monospace(9.0));
+            },
+        );
+        assert_eq!(opening_outcome, None);
+        assert!(has_viewport_scrim(&opening_output, viewport));
+        opening_output.textures_delta.clear();
+
+        let mut closing_outcome = None;
+        let mut closing_output = context.run_ui(
+            pointer_click_input(viewport, 2.0, pointer, egui::PointerButton::Secondary),
+            |ui| {
+                closing_outcome = arc.show(ui.ctx(), FontId::monospace(9.0));
+            },
+        );
+        closing_output.textures_delta.clear();
+        assert_eq!(closing_outcome, Some(TacticalArcOutcome::Dismiss));
+        assert!(!has_viewport_scrim(&closing_output, viewport));
+    }
+
+    #[test]
+    fn keyboard_navigation_updates_visual_selection_before_first_paint() {
+        let context = egui::Context::default();
+        let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 720.0));
+        let mut arc = arc_with_motion_query(|| Some(false), true);
+        let mut input = raw_input(viewport, 1.0, None);
+        input.events.push(egui::Event::Key {
+            key: Key::ArrowRight,
+            physical_key: Some(Key::ArrowRight),
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+
+        let mut output = context.run_ui(input, |ui| {
+            arc.show(ui.ctx(), FontId::monospace(9.0));
+        });
+        let text = rendered_text_shapes(&output);
+        let active_label = rendered_text(&text, "2  BIN");
+        let active_color = rendered_color(active_label);
+        let command_matches = text
+            .iter()
+            .any(|shape| shape.galley.text() == "MOVE TO RECYCLE BIN");
+        output.textures_delta.clear();
+        assert_eq!(active_color, ACTIVE_LABEL_INK);
+        assert!(command_matches);
     }
 
     #[test]
@@ -2424,7 +2572,7 @@ mod tests {
     }
 
     #[test]
-    fn full_viewport_shield_blocks_underlay_and_outside_click_dismisses() {
+    fn disabled_opening_underlay_and_later_viewport_shield_block_click_through() {
         let context = egui::Context::default();
         let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 720.0));
         let target = target_fixture("9.7 GB", "archive", r"C:\Data\archive", r"C:\");
@@ -2440,33 +2588,37 @@ mod tests {
         assert!(!arc.geometry.bounds().contains(outside));
         let button_rect = Rect::from_center_size(outside, Vec2::splat(72.0));
         let underlay_clicked = Cell::new(false);
-        let mut run_frame = |input: egui::RawInput| {
+        let mut run_frame = |input: egui::RawInput, underlay_enabled: bool| {
             let mut outcome = None;
             let mut output = context.run_ui(input, |ui| {
-                let response = ui.put(button_rect, egui::Button::new("UNDERLAY"));
+                let response = ui
+                    .add_enabled_ui(underlay_enabled, |ui| {
+                        ui.put(button_rect, egui::Button::new("UNDERLAY"))
+                    })
+                    .inner;
                 underlay_clicked.set(underlay_clicked.get() || response.clicked());
                 outcome = arc.show(ui.ctx(), FontId::monospace(9.0));
             });
             output.textures_delta.clear();
             outcome
         };
-        assert_eq!(run_frame(raw_input(viewport, 1.0, None)), None);
-        let mut click = raw_input(viewport, 2.0, Some(outside));
-        click.events.extend([
-            egui::Event::PointerButton {
-                pos: outside,
-                button: egui::PointerButton::Primary,
-                pressed: true,
-                modifiers: egui::Modifiers::NONE,
-            },
-            egui::Event::PointerButton {
-                pos: outside,
-                button: egui::PointerButton::Primary,
-                pressed: false,
-                modifiers: egui::Modifiers::NONE,
-            },
-        ]);
-        assert_eq!(run_frame(click), Some(TacticalArcOutcome::Dismiss));
+        assert_eq!(
+            run_frame(
+                pointer_click_input(viewport, 1.0, outside, egui::PointerButton::Secondary,),
+                false,
+            ),
+            None,
+            "the app disables its underlay while the opening secondary event is ignored"
+        );
+        assert!(!underlay_clicked.get());
+
+        assert_eq!(
+            run_frame(
+                pointer_click_input(viewport, 2.0, outside, egui::PointerButton::Primary,),
+                true,
+            ),
+            Some(TacticalArcOutcome::Dismiss)
+        );
         assert!(!underlay_clicked.get());
     }
 
@@ -2616,8 +2768,16 @@ mod tests {
     fn enter_uses_keyboard_target_while_pointer_owns_visual_selection() {
         let context = egui::Context::default();
         let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 720.0));
-        let mut arc = arc_with_motion_query(|| Some(false), true);
+        let mut arc = arc_with_motion_query(|| Some(true), true);
         let pointer = arc.geometry.action_center(TacticalAction::Recycle.index());
+        let mut opening_output = context.run_ui(raw_input(viewport, 9.0, None), |ui| {
+            assert_eq!(arc.show(ui.ctx(), FontId::monospace(9.0)), None);
+        });
+        opening_output.textures_delta.clear();
+        let mut settle_output = context.run_ui(raw_input(viewport, 9.5, None), |ui| {
+            assert_eq!(arc.show(ui.ctx(), FontId::monospace(9.0)), None);
+        });
+        settle_output.textures_delta.clear();
         let mut input = raw_input(viewport, 10.0, Some(pointer));
         input.events.push(egui::Event::Key {
             key: Key::Enter,
@@ -2630,12 +2790,22 @@ mod tests {
         let mut output = context.run_ui(input, |ui| {
             outcome = arc.show(ui.ctx(), FontId::monospace(9.0));
         });
-        assert_eq!(arc.visual_active_action(), Some(TacticalAction::Recycle));
+        let visual_action = arc.visual_active_action();
+        let has_scrim = has_viewport_scrim(&output, viewport);
+        output.textures_delta.clear();
+        let mut cause_output = context.run_ui(raw_input(viewport, 11.0, None), |_ui| {});
+        let repaint_causes = context.repaint_causes();
+        cause_output.textures_delta.clear();
+        assert_eq!(visual_action, Some(TacticalAction::Recycle));
         assert_eq!(
             outcome,
             Some(TacticalArcOutcome::Action(TacticalAction::OpenInExplorer))
         );
-        output.textures_delta.clear();
+        assert!(!has_scrim);
+        assert!(
+            repaint_causes.iter().all(|cause| cause.file != file!()),
+            "closing the arc must not request its 16 ms animation repaint: {repaint_causes:?}"
+        );
     }
 
     #[test]
