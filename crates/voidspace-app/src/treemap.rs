@@ -476,7 +476,7 @@ impl PreviewState {
 
 pub struct TreemapResponse {
     pub action: Option<TreemapAction>,
-    pub context_target: Option<(NodeId, egui::Id, bool)>,
+    pub context_target: Option<(NodeId, egui::Id, bool, Rect)>,
     pub aggregate_still_valid: bool,
 }
 
@@ -550,6 +550,13 @@ pub(crate) fn preview_chain(
 
 fn nested_layer_accepts_click(parent_chain_index: Option<usize>) -> bool {
     parent_chain_index.is_some()
+}
+
+fn context_hit_at(pointer: Pos2, visible_hits: &[VisibleHit]) -> Option<&VisibleHit> {
+    visible_hits
+        .iter()
+        .rev()
+        .find(|hit| hit.rect.contains(pointer))
 }
 
 pub(crate) struct ShowRequest<'a> {
@@ -723,6 +730,7 @@ pub fn show(ui: &mut Ui, request: ShowRequest<'_>) -> TreemapResponse {
     }
 
     let mut nested_hits = Vec::new();
+    let mut context_hits = base_hits.clone();
     let mut active_parent = active_base.and_then(|id| {
         base_hits
             .iter()
@@ -858,6 +866,8 @@ pub fn show(ui: &mut Ui, request: ShowRequest<'_>) -> TreemapResponse {
                 .copied();
             let next_active = persistent_child.or(hovered_child);
 
+            context_hits.extend(layer_hits.iter().cloned());
+
             for (rank, node) in nested_layout
                 .nodes
                 .iter()
@@ -927,7 +937,23 @@ pub fn show(ui: &mut Ui, request: ShowRequest<'_>) -> TreemapResponse {
     let base_responses = hit_responses(ui, base_layout.root, base_hits);
     let nested_responses = hit_responses(ui, base_layout.root, nested_hits);
     let mut action = None;
-    let mut context_target = None;
+    let secondary_clicked = ui.input(|input| input.pointer.secondary_clicked());
+    let mut context_target = secondary_clicked
+        .then(|| {
+            pointer
+                .and_then(|position| context_hit_at(position, &context_hits))
+                .and_then(|hit| {
+                    file_action_target(hit).map(|node_id| {
+                        (
+                            node_id,
+                            tile_response_id(ui, base_layout.root, hit),
+                            false,
+                            hit.rect,
+                        )
+                    })
+                })
+        })
+        .flatten();
     for (hit, tile_response) in nested_responses
         .iter()
         .rev()
@@ -936,8 +962,13 @@ pub fn show(ui: &mut Ui, request: ShowRequest<'_>) -> TreemapResponse {
         if let Some(node_id) = file_action_target(hit) {
             let keyboard_context = tile_response.has_focus()
                 && ui.input(|input| input.modifiers.shift && input.key_pressed(egui::Key::F10));
-            if tile_response.secondary_clicked() || keyboard_context {
-                context_target = Some((node_id, tile_response.id, keyboard_context));
+            if keyboard_context {
+                context_target = Some((
+                    node_id,
+                    tile_response.id,
+                    keyboard_context,
+                    tile_response.rect,
+                ));
             }
         }
         let keyboard_zoom = tile_response.has_focus()
@@ -984,11 +1015,7 @@ fn hit_responses(
 ) -> Vec<(VisibleHit, egui::Response)> {
     hits.into_iter()
         .map(|hit| {
-            let response = ui.interact(
-                hit.rect,
-                ui.id().with((root, hit.node_id, hit.depth, hit.aggregated)),
-                Sense::click(),
-            );
+            let response = ui.interact(hit.rect, tile_response_id(ui, root, &hit), Sense::click());
             response.widget_info(|| {
                 egui::WidgetInfo::labeled(
                     egui::WidgetType::Button,
@@ -1011,6 +1038,10 @@ fn hit_responses(
             (hit, response.on_hover_text(hint))
         })
         .collect()
+}
+
+fn tile_response_id(ui: &Ui, root: NodeId, hit: &VisibleHit) -> egui::Id {
+    ui.id().with((root, hit.node_id, hit.depth, hit.aggregated))
 }
 
 fn tile_accessible_name(snapshot: &IndexSnapshot, node: &LayoutNode) -> String {
@@ -1326,6 +1357,67 @@ mod interaction_tests {
 
         assert_eq!(file_action_target(&real), Some(NodeId(41)));
         assert_eq!(file_action_target(&aggregate), None);
+    }
+
+    #[test]
+    fn context_hit_prefers_the_exact_deepest_visible_block() {
+        let parent = VisibleHit {
+            node_id: NodeId(10),
+            rect: Rect::from_min_max(Pos2::ZERO, Pos2::new(200.0, 200.0)),
+            depth: 1,
+            aggregated: false,
+            expandable: true,
+            name: "parent".into(),
+            formatted_size: "20G".into(),
+            aggregate_members: Vec::new(),
+        };
+        let child = VisibleHit {
+            node_id: NodeId(11),
+            rect: Rect::from_min_max(Pos2::new(20.0, 20.0), Pos2::new(180.0, 180.0)),
+            depth: 2,
+            name: "child".into(),
+            ..parent.clone()
+        };
+        let grandchild = VisibleHit {
+            node_id: NodeId(12),
+            rect: Rect::from_min_max(Pos2::new(40.0, 40.0), Pos2::new(160.0, 160.0)),
+            depth: 3,
+            name: "grandchild".into(),
+            ..parent.clone()
+        };
+        let hits = [parent, child, grandchild];
+
+        let target = context_hit_at(Pos2::new(100.0, 100.0), &hits).and_then(file_action_target);
+
+        assert_eq!(target, Some(NodeId(12)));
+    }
+
+    #[test]
+    fn context_hit_on_other_never_falls_through_to_its_parent() {
+        let parent = VisibleHit {
+            node_id: NodeId(20),
+            rect: Rect::from_min_max(Pos2::ZERO, Pos2::new(200.0, 200.0)),
+            depth: 1,
+            aggregated: false,
+            expandable: true,
+            name: "parent".into(),
+            formatted_size: "20G".into(),
+            aggregate_members: Vec::new(),
+        };
+        let other = VisibleHit {
+            node_id: NodeId(21),
+            rect: Rect::from_min_max(Pos2::new(20.0, 20.0), Pos2::new(180.0, 180.0)),
+            depth: 2,
+            aggregated: true,
+            expandable: false,
+            name: "OTHER".into(),
+            ..parent.clone()
+        };
+        let hits = [parent, other];
+
+        let target = context_hit_at(Pos2::new(100.0, 100.0), &hits).and_then(file_action_target);
+
+        assert_eq!(target, None);
     }
 
     #[test]

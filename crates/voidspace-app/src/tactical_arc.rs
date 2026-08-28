@@ -26,6 +26,7 @@ const TARGET_PLATE_BACKGROUND: Color32 = Color32::from_rgb(0x0b, 0x0f, 0x11);
 const TARGET_PLATE_BORDER: Color32 = Color32::from_rgb(0x3a, 0x44, 0x49);
 const TARGET_PLATE_MUTED: Color32 = Color32::from_rgb(0x8e, 0x94, 0x9d);
 const MODAL_SCRIM: Color32 = Color32::from_black_alpha(184);
+const TARGET_LOCK_RED: Color32 = Color32::from_rgb(0xff, 0x3b, 0x30);
 
 mod primitives {
     use egui::{Color32, Stroke};
@@ -627,15 +628,84 @@ fn animation_repaint_after(
     (motion_enabled && pointer_hovered_action.is_some()).then(|| Duration::from_millis(16))
 }
 
+fn paint_source_target_lock(
+    painter: &egui::Painter,
+    rect: Rect,
+    intensity: f32,
+    geometry_scale: f32,
+) {
+    let intensity = intensity.clamp(0.0, 1.0);
+    let scale = geometry_scale.max(COMPACT_SCALE);
+    let tint_alpha = (34.0 + intensity * 34.0).round() as u8;
+    let middle_alpha = (88.0 + intensity * 86.0).round() as u8;
+    let outer_alpha = (28.0 + intensity * 48.0).round() as u8;
+    painter.rect_filled(
+        rect,
+        0.0,
+        Color32::from_rgba_unmultiplied(
+            TARGET_LOCK_RED.r(),
+            TARGET_LOCK_RED.g(),
+            TARGET_LOCK_RED.b(),
+            tint_alpha,
+        ),
+    );
+    painter.rect_stroke(
+        rect.expand(8.0 * scale),
+        2.0 * scale,
+        Stroke::new(
+            (8.0 + 4.0 * intensity) * scale,
+            Color32::from_rgba_unmultiplied(
+                TARGET_LOCK_RED.r(),
+                TARGET_LOCK_RED.g(),
+                TARGET_LOCK_RED.b(),
+                outer_alpha,
+            ),
+        ),
+        egui::StrokeKind::Inside,
+    );
+    painter.rect_stroke(
+        rect.expand(3.0 * scale),
+        1.0 * scale,
+        Stroke::new(
+            (4.0 + 2.0 * intensity) * scale,
+            Color32::from_rgba_unmultiplied(
+                TARGET_LOCK_RED.r(),
+                TARGET_LOCK_RED.g(),
+                TARGET_LOCK_RED.b(),
+                middle_alpha,
+            ),
+        ),
+        egui::StrokeKind::Inside,
+    );
+    painter.rect_stroke(
+        rect,
+        0.0,
+        Stroke::new((2.0 + intensity) * scale, TARGET_LOCK_RED),
+        egui::StrokeKind::Inside,
+    );
+    hud::paint_corner_brackets(painter, rect.shrink(4.0 * scale), TARGET_LOCK_RED);
+    if rect.width() >= 112.0 && rect.height() >= 48.0 {
+        painter.text(
+            rect.right_top() + Vec2::new(-10.0 * scale, 10.0 * scale),
+            Align2::RIGHT_TOP,
+            "TARGET LOCKED",
+            FontId::monospace(9.0 * scale),
+            TARGET_LOCK_RED,
+        );
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct TacticalArcState {
     target: ContextTarget,
     pub geometry: TacticalArcGeometry,
+    source_rect: Option<Rect>,
     keyboard_index: Option<usize>,
     focus_slot: Option<ModalFocusSlot>,
     focus_request_pending: bool,
     pointer_hovered_action: Option<TacticalAction>,
     pointer_beat_started_at: Option<f64>,
+    target_beat_started_at: Option<f64>,
     motion_enabled: bool,
     armed: bool,
     target_semantics: TargetSemantics,
@@ -670,6 +740,7 @@ impl ModalFocusSlot {
 }
 
 impl TacticalArcState {
+    #[cfg(test)]
     pub fn new(
         target: ContextTarget,
         pointer: Pos2,
@@ -681,6 +752,24 @@ impl TacticalArcState {
             pointer,
             work_area,
             keyboard_open,
+            None,
+            client_area_animation_enabled,
+        )
+    }
+
+    pub fn new_with_source_rect(
+        target: ContextTarget,
+        pointer: Pos2,
+        work_area: Rect,
+        keyboard_open: bool,
+        source_rect: Rect,
+    ) -> Option<Self> {
+        Self::new_with_motion_query_impl(
+            target,
+            pointer,
+            work_area,
+            keyboard_open,
+            Some(source_rect),
             client_area_animation_enabled,
         )
     }
@@ -693,7 +782,26 @@ impl TacticalArcState {
         keyboard_open: bool,
         query: impl FnOnce() -> Option<bool>,
     ) -> Option<Self> {
-        Self::new_with_motion_query_impl(target, pointer, work_area, keyboard_open, query)
+        Self::new_with_motion_query_impl(target, pointer, work_area, keyboard_open, None, query)
+    }
+
+    #[cfg(test)]
+    fn new_with_source_rect_and_motion_query(
+        target: ContextTarget,
+        pointer: Pos2,
+        work_area: Rect,
+        keyboard_open: bool,
+        source_rect: Rect,
+        query: impl FnOnce() -> Option<bool>,
+    ) -> Option<Self> {
+        Self::new_with_motion_query_impl(
+            target,
+            pointer,
+            work_area,
+            keyboard_open,
+            Some(source_rect),
+            query,
+        )
     }
 
     fn new_with_motion_query_impl(
@@ -701,6 +809,7 @@ impl TacticalArcState {
         pointer: Pos2,
         work_area: Rect,
         keyboard_open: bool,
+        source_rect: Option<Rect>,
         query: impl FnOnce() -> Option<bool>,
     ) -> Option<Self> {
         let geometry = TacticalArcGeometry::fit(pointer, work_area, 1.0)?;
@@ -708,11 +817,13 @@ impl TacticalArcState {
         Some(Self {
             target,
             geometry,
+            source_rect,
             keyboard_index: keyboard_open.then_some(0),
             focus_slot: keyboard_open.then_some(ModalFocusSlot::Action(0)),
             focus_request_pending: keyboard_open,
             pointer_hovered_action: None,
             pointer_beat_started_at: None,
+            target_beat_started_at: None,
             motion_enabled: query().unwrap_or(false),
             armed: false,
             target_semantics,
@@ -828,6 +939,7 @@ impl TacticalArcState {
         let pointer = context.pointer_hover_pos();
         let hovered = pointer.and_then(|position| geometry.hit_test(position));
         let now = context.input(|input| input.time);
+        self.target_beat_started_at.get_or_insert(now);
         self.update_pointer_hover(hovered, now);
         let focused = context.memory(|memory| memory.focused());
         if let Some(slot) = (0..ModalFocusSlot::COUNT)
@@ -928,6 +1040,7 @@ impl TacticalArcState {
         let pointer = context.pointer_hover_pos();
         let hovered = pointer.and_then(|position| geometry.hit_test(position));
         let now = context.input(|input| input.time);
+        let target_beat_started_at = *self.target_beat_started_at.get_or_insert(now);
         self.update_pointer_hover(hovered, now);
         let visual_active_action = self.visual_active_action();
         let pointer_beat_intensity = if self.motion_enabled && hovered.is_some() {
@@ -940,6 +1053,14 @@ impl TacticalArcState {
         if let Some(delay) = animation_repaint_after(self.motion_enabled, hovered) {
             context.request_repaint_after(delay);
         }
+        if self.motion_enabled && self.source_rect.is_some() {
+            context.request_repaint_after(Duration::from_millis(16));
+        }
+        let target_beat_intensity = if self.motion_enabled {
+            primitives::reactor_beat((now - target_beat_started_at) as f32)
+        } else {
+            0.0
+        };
         let modal_area = egui::Area::new(Id::new("tactical-arc"))
             .order(egui::Order::Foreground)
             .sense(Sense::CLICK)
@@ -960,10 +1081,32 @@ impl TacticalArcState {
             let draw_geometry = geometry_for_area_painter(geometry, rect);
             let center = draw_geometry.center;
             painter.rect_filled(rect, 0.0, MODAL_SCRIM);
+            if let Some(source_rect) = self.source_rect {
+                let source_rect = source_rect.intersect(content_rect);
+                if source_rect.width() > 2.0 && source_rect.height() > 2.0 {
+                    paint_source_target_lock(
+                        &painter,
+                        source_rect,
+                        target_beat_intensity,
+                        draw_geometry.scale,
+                    );
+                }
+            }
             if draw_geometry.origin.distance(center) > 2.0 {
                 painter.line_segment(
                     [draw_geometry.origin, center],
-                    Stroke::new(1.0, hud::ORANGE),
+                    Stroke::new(
+                        if self.source_rect.is_some() {
+                            1.75
+                        } else {
+                            1.0
+                        },
+                        if self.source_rect.is_some() {
+                            TARGET_LOCK_RED
+                        } else {
+                            hud::ORANGE
+                        },
+                    ),
                 );
             }
             if let Some(pointer) = pointer {
@@ -2901,6 +3044,75 @@ mod tests {
             .repaint_delay;
         peak.textures_delta.clear();
         assert_eq!(repaint_delay, Duration::from_millis(16));
+    }
+
+    #[test]
+    fn source_target_renders_a_visible_saturated_red_lock_above_the_scrim() {
+        let context = egui::Context::default();
+        let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 720.0));
+        let source_rect = Rect::from_min_max(Pos2::new(36.0, 72.0), Pos2::new(356.0, 292.0));
+        let target = target_fixture("53.2 GiB", "Users", r"C:\Users", r"C:\");
+        let mut arc = TacticalArcState::new_with_source_rect_and_motion_query(
+            target,
+            Pos2::new(640.0, 360.0),
+            viewport,
+            false,
+            source_rect,
+            || Some(true),
+        )
+        .expect("target lock composition fits");
+
+        let mut warm_up = context.run_ui(raw_input(viewport, 10.0, None), |ui| {
+            arc.show(ui.ctx(), FontId::monospace(9.0));
+        });
+        warm_up.textures_delta.clear();
+        let mut settle = context.run_ui(raw_input(viewport, 10.0, None), |ui| {
+            arc.show(ui.ctx(), FontId::monospace(9.0));
+        });
+        settle.textures_delta.clear();
+        let mut output = context.run_ui(
+            raw_input(
+                viewport,
+                10.0 + f64::from(0.12 * REACTOR_BEAT_SECONDS),
+                None,
+            ),
+            |ui| {
+                arc.show(ui.ctx(), FontId::monospace(9.0));
+            },
+        );
+
+        let text = rendered_text_shapes(&output);
+        let lock_label = rendered_text(&text, "TARGET LOCKED");
+        assert_eq!(rendered_color(lock_label), TARGET_LOCK_RED);
+
+        fn has_red_target_lock(shape: &Shape, source_rect: Rect) -> bool {
+            match shape {
+                Shape::Vec(shapes) => shapes
+                    .iter()
+                    .any(|shape| has_red_target_lock(shape, source_rect)),
+                Shape::Rect(rect) => {
+                    rect.rect == source_rect
+                        && rect.stroke.color == TARGET_LOCK_RED
+                        && rect.stroke.width >= 2.0
+                }
+                _ => false,
+            }
+        }
+        assert!(
+            output
+                .shapes
+                .iter()
+                .any(|clipped| has_red_target_lock(&clipped.shape, source_rect))
+        );
+        assert_eq!(
+            output
+                .viewport_output
+                .get(&egui::ViewportId::ROOT)
+                .expect("root viewport output")
+                .repaint_delay,
+            Duration::from_millis(16)
+        );
+        output.textures_delta.clear();
     }
 
     #[test]

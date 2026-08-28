@@ -1521,23 +1521,28 @@ impl VoidspaceApp {
                 if !response.aggregate_still_valid {
                     tab.treemap_state.aggregate = None;
                 }
-                if let Some((target, origin_focus, keyboard_open)) = response.context_target {
+                if let Some((target, origin_focus, keyboard_open, source_rect)) =
+                    response.context_target
+                {
                     tab.treemap_state.selected = Some(target);
                     tab.treemap_state.aggregate = None;
                     if let Some(node) = tab.snapshot.node(target) {
-                        pending_context_target = Some(ContextTarget {
-                            scan_id: tab.snapshot.scan_id,
-                            generation: tab.snapshot.generation,
-                            node_id: target,
-                            identity: node.identity.clone(),
-                            path: path_for_node(tab, target),
-                            kind: node.kind,
-                            root: tab.root_path.clone(),
-                            view_root,
-                            display_name: node.name.display_escaped(),
-                            display_size: treemap::compact_bytes(node.allocated),
-                            origin_focus,
-                        });
+                        pending_context_target = Some((
+                            ContextTarget {
+                                scan_id: tab.snapshot.scan_id,
+                                generation: tab.snapshot.generation,
+                                node_id: target,
+                                identity: node.identity.clone(),
+                                path: path_for_node(tab, target),
+                                kind: node.kind,
+                                root: tab.root_path.clone(),
+                                view_root,
+                                display_name: node.name.display_escaped(),
+                                display_size: treemap::compact_bytes(node.allocated),
+                                origin_focus,
+                            },
+                            source_rect,
+                        ));
                         tactical_work_area = Some((available, keyboard_open));
                     }
                 }
@@ -1577,14 +1582,20 @@ impl VoidspaceApp {
                 self.overlays.close_transient(&context);
             }
         }
-        if let Some(target) = pending_context_target {
+        if let Some((target, source_rect)) = pending_context_target {
             let pointer = context
                 .input(|input| input.pointer.interact_pos())
                 .unwrap_or_else(|| context.content_rect().center());
             let origin_focus = target.origin_focus;
             let (work_area, keyboard_open) =
                 tactical_work_area.unwrap_or((context.content_rect(), false));
-            if let Some(arc) = TacticalArcState::new(target, pointer, work_area, keyboard_open) {
+            if let Some(arc) = TacticalArcState::new_with_source_rect(
+                target,
+                pointer,
+                work_area,
+                keyboard_open,
+                source_rect,
+            ) {
                 self.tactical_arc = Some(arc);
                 self.overlays
                     .open_transient(TransientOverlay::TacticalArc, Some(origin_focus));
