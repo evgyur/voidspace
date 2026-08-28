@@ -13,6 +13,140 @@ const RAIL_WIDTH: f32 = 152.0;
 const RAIL_HEIGHT: f32 = 44.0;
 const SAFE_MARGIN: f32 = 8.0;
 
+#[allow(dead_code)] // Staged primitives are consumed by the target-plate and hover slices.
+mod primitives {
+    use egui::{Color32, Stroke};
+    use unicode_segmentation::UnicodeSegmentation;
+
+    pub(super) const REACTOR_BEAT_SECONDS: f32 = 1.35;
+    pub(super) const ACTIVE_CYAN: Color32 = Color32::from_rgb(0x1e, 0xcd, 0xe2);
+    pub(super) const ACTIVE_LIME: Color32 = Color32::from_rgb(0xbd, 0xff, 0x3e);
+    pub(super) const ACTIVE_MAGENTA: Color32 = Color32::from_rgb(0xff, 0x49, 0xbc);
+    pub(super) const ACTIVE_LABEL_INK: Color32 = Color32::from_rgb(0x07, 0x09, 0x0a);
+    const ELLIPSIS: &str = "…";
+
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub(super) struct ActiveSectorStyle {
+        pub(super) fill: Color32,
+        pub(super) inner_stroke: Stroke,
+        pub(super) outer_bloom: Stroke,
+        pub(super) label_color: Color32,
+        pub(super) label_scale: f32,
+    }
+
+    pub(super) fn reactor_beat(elapsed_seconds: f32) -> f32 {
+        const KEYFRAMES: [(f32, f32); 6] = [
+            (0.0, 0.0),
+            (0.12, 1.0),
+            (0.22, 0.0),
+            (0.34, 1.0),
+            (0.45, 0.0),
+            (1.0, 0.0),
+        ];
+
+        let phase = (elapsed_seconds / REACTOR_BEAT_SECONDS).rem_euclid(1.0);
+        for keyframes in KEYFRAMES.windows(2) {
+            let (start_phase, start_intensity) = keyframes[0];
+            let (end_phase, end_intensity) = keyframes[1];
+            if phase <= end_phase {
+                let position = (phase - start_phase) / (end_phase - start_phase);
+                let smoothstep = position * position * (3.0 - 2.0 * position);
+                return start_intensity + (end_intensity - start_intensity) * smoothstep;
+            }
+        }
+        0.0
+    }
+
+    pub(super) fn active_sector_style(
+        semantic_color: Color32,
+        intensity: f32,
+        geometry_scale: f32,
+    ) -> ActiveSectorStyle {
+        let intensity = intensity.clamp(0.0, 1.0);
+        let geometry_scale = geometry_scale.max(0.0);
+        let fill = Color32::from_rgb(semantic_color.r(), semantic_color.g(), semantic_color.b());
+        let bloom_alpha = (72.0 + 112.0 * intensity).round() as u8;
+        let bloom_color =
+            Color32::from_rgba_unmultiplied(fill.r(), fill.g(), fill.b(), bloom_alpha);
+        ActiveSectorStyle {
+            fill,
+            inner_stroke: Stroke::new(2.0 * geometry_scale, fill),
+            outer_bloom: Stroke::new((2.0 + 3.0 * intensity) * geometry_scale, bloom_color),
+            label_color: ACTIVE_LABEL_INK,
+            label_scale: 1.0 + 0.095 * intensity,
+        }
+    }
+
+    pub(super) fn end_ellipsis<F>(
+        value: &str,
+        maximum_width: f32,
+        minimum_leading_graphemes: usize,
+        measure: F,
+    ) -> Option<String>
+    where
+        F: Fn(&str) -> f32,
+    {
+        if measure(value) <= maximum_width {
+            return Some(value.to_owned());
+        }
+
+        let graphemes = value.graphemes(true).collect::<Vec<_>>();
+        if minimum_leading_graphemes >= graphemes.len() {
+            return None;
+        }
+        for leading_count in (minimum_leading_graphemes..graphemes.len()).rev() {
+            let mut candidate = graphemes[..leading_count].concat();
+            candidate.push_str(ELLIPSIS);
+            if measure(&candidate) <= maximum_width {
+                return Some(candidate);
+            }
+        }
+        None
+    }
+
+    pub(super) fn middle_ellipsis<F>(
+        value: &str,
+        preserved_prefix: &str,
+        preserved_suffix: &str,
+        maximum_width: f32,
+        measure: F,
+    ) -> Option<String>
+    where
+        F: Fn(&str) -> f32,
+    {
+        let graphemes = value.graphemes(true).collect::<Vec<_>>();
+        let prefix = preserved_prefix.graphemes(true).collect::<Vec<_>>();
+        let suffix = preserved_suffix.graphemes(true).collect::<Vec<_>>();
+        if prefix.len() + suffix.len() > graphemes.len()
+            || !graphemes.starts_with(&prefix)
+            || !graphemes.ends_with(&suffix)
+        {
+            return None;
+        }
+        if measure(value) <= maximum_width {
+            return Some(value.to_owned());
+        }
+
+        let optional_count = graphemes.len() - prefix.len() - suffix.len();
+        for retained_count in (0..optional_count).rev() {
+            for left_count in (0..=retained_count).rev() {
+                let right_count = retained_count - left_count;
+                let left_end = prefix.len() + left_count;
+                let right_start = graphemes.len() - suffix.len() - right_count;
+                let mut candidate = graphemes[..left_end].concat();
+                candidate.push_str(ELLIPSIS);
+                candidate.extend(graphemes[right_start..].iter().copied());
+                if measure(&candidate) <= maximum_width {
+                    return Some(candidate);
+                }
+            }
+        }
+        None
+    }
+}
+
+use primitives::{ACTIVE_CYAN, ACTIVE_LIME, ACTIVE_MAGENTA};
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContextTarget {
     pub scan_id: ScanId,
@@ -58,7 +192,7 @@ const SECTORS: [SectorSpec; 3] = [
         label: "OPEN IN EXPLORER",
         accessible_name: "Open in Explorer",
         shortcut: "1",
-        color: hud::CYAN,
+        color: ACTIVE_CYAN,
     },
     SectorSpec {
         action: TacticalAction::Recycle,
@@ -66,7 +200,7 @@ const SECTORS: [SectorSpec; 3] = [
         label: "MOVE TO RECYCLE BIN",
         accessible_name: "Move to Recycle Bin",
         shortcut: "2",
-        color: hud::LIME,
+        color: ACTIVE_LIME,
     },
     SectorSpec {
         action: TacticalAction::DeletePermanently,
@@ -74,7 +208,7 @@ const SECTORS: [SectorSpec; 3] = [
         label: "DELETE WITHOUT RECOVERY",
         accessible_name: "Delete without recovery",
         shortcut: "3",
-        color: hud::MAGENTA,
+        color: ACTIVE_MAGENTA,
     },
 ];
 
@@ -496,7 +630,156 @@ fn truncate(value: &str, maximum: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::primitives::*;
     use super::*;
+    use unicode_segmentation::UnicodeSegmentation;
+
+    const EPSILON: f32 = 1.0e-6;
+
+    fn assert_close(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() <= EPSILON,
+            "expected {expected}, got {actual}"
+        );
+    }
+
+    fn grapheme_width(value: &str) -> f32 {
+        value.graphemes(true).count() as f32
+    }
+
+    fn relative_luminance(color: Color32) -> f32 {
+        fn linearize(channel: u8) -> f32 {
+            let channel = f32::from(channel) / 255.0;
+            if channel <= 0.04045 {
+                channel / 12.92
+            } else {
+                ((channel + 0.055) / 1.055).powf(2.4)
+            }
+        }
+
+        0.2126 * linearize(color.r())
+            + 0.7152 * linearize(color.g())
+            + 0.0722 * linearize(color.b())
+    }
+
+    fn contrast_ratio(first: Color32, second: Color32) -> f32 {
+        let first = relative_luminance(first);
+        let second = relative_luminance(second);
+        let lighter = first.max(second);
+        let darker = first.min(second);
+        (lighter + 0.05) / (darker + 0.05)
+    }
+
+    #[test]
+    fn reactor_beat_hits_every_exact_keyframe() {
+        for (phase, expected) in [
+            (0.0, 0.0),
+            (0.12, 1.0),
+            (0.22, 0.0),
+            (0.34, 1.0),
+            (0.45, 0.0),
+            (1.0, 0.0),
+        ] {
+            assert_close(reactor_beat(phase * REACTOR_BEAT_SECONDS), expected);
+        }
+    }
+
+    #[test]
+    fn reactor_beat_uses_smoothstep_and_stays_normalized() {
+        assert_close(reactor_beat(0.06 * REACTOR_BEAT_SECONDS), 0.5);
+        assert_close(reactor_beat(0.17 * REACTOR_BEAT_SECONDS), 0.5);
+        assert_close(reactor_beat(0.28 * REACTOR_BEAT_SECONDS), 0.5);
+
+        for sample in -2700..=2700 {
+            let intensity = reactor_beat(sample as f32 / 1000.0);
+            assert!(
+                (0.0..=1.0).contains(&intensity),
+                "sample {sample}: {intensity}"
+            );
+        }
+    }
+
+    #[test]
+    fn reactor_beat_has_a_quiet_rest_phase() {
+        for phase in [0.45, 0.7, 0.999_999] {
+            assert_close(reactor_beat(phase * REACTOR_BEAT_SECONDS), 0.0);
+        }
+        assert_close(reactor_beat(-0.01 * REACTOR_BEAT_SECONDS), 0.0);
+    }
+
+    #[test]
+    fn reactor_beat_wraps_at_the_loop_boundary() {
+        assert_close(reactor_beat(REACTOR_BEAT_SECONDS), 0.0);
+        assert_close(reactor_beat(REACTOR_BEAT_SECONDS * 2.0), 0.0);
+        assert_close(
+            reactor_beat(REACTOR_BEAT_SECONDS * 1.06),
+            reactor_beat(REACTOR_BEAT_SECONDS * 0.06),
+        );
+    }
+
+    #[test]
+    fn active_style_scales_the_label_and_caps_bloom_width() {
+        let baseline = active_sector_style(ACTIVE_CYAN, 0.0, 0.75);
+        let peak = active_sector_style(ACTIVE_CYAN, 1.0, 0.75);
+        assert_close(baseline.label_scale, 1.0);
+        assert_close(peak.label_scale, 1.095);
+        assert_eq!(baseline.inner_stroke.color, ACTIVE_CYAN);
+        assert_close(baseline.inner_stroke.width, 2.0 * 0.75);
+        assert!(baseline.outer_bloom.width <= 5.0 * 0.75);
+        assert_close(peak.outer_bloom.width, 5.0 * 0.75);
+
+        let clamped = active_sector_style(ACTIVE_CYAN, 10.0, 1.0);
+        assert_close(clamped.label_scale, 1.095);
+        assert_close(clamped.outer_bloom.width, 5.0);
+    }
+
+    #[test]
+    fn active_tokens_are_exact_opaque_colors_with_accessible_label_contrast() {
+        assert_eq!(ACTIVE_CYAN.to_array(), [0x1e, 0xcd, 0xe2, 0xff]);
+        assert_eq!(ACTIVE_LIME.to_array(), [0xbd, 0xff, 0x3e, 0xff]);
+        assert_eq!(ACTIVE_MAGENTA.to_array(), [0xff, 0x49, 0xbc, 0xff]);
+        assert_eq!(ACTIVE_LABEL_INK.to_array(), [0x07, 0x09, 0x0a, 0xff]);
+
+        for color in [ACTIVE_CYAN, ACTIVE_LIME, ACTIVE_MAGENTA] {
+            for phase in [0.0, 0.12, 0.34] {
+                let intensity = reactor_beat(phase * REACTOR_BEAT_SECONDS);
+                let style = active_sector_style(color, intensity, 1.0);
+                assert_eq!(style.fill.a(), 255);
+                assert_eq!(style.label_color, ACTIVE_LABEL_INK);
+                assert!(
+                    contrast_ratio(style.fill, style.label_color) >= 4.5,
+                    "insufficient contrast for {color:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn end_ellipsis_preserves_unicode_graphemes_and_minimum_name_prefix() {
+        let value = "👨‍👩‍👧‍👦e\u{301}東京資料";
+
+        let fitted = end_ellipsis(value, 5.0, 4, grapheme_width)
+            .expect("four leading graphemes and the ellipsis fit");
+
+        assert_eq!(fitted, "👨‍👩‍👧‍👦e\u{301}東京…");
+        assert_eq!(fitted.graphemes(true).count(), 5);
+        assert!(end_ellipsis(value, 4.0, 4, grapheme_width).is_none());
+    }
+
+    #[test]
+    fn middle_ellipsis_preserves_path_root_and_final_component() {
+        let path = "C:\\用戶\\👨‍👩‍👧‍👦\\資料\\報告.txt";
+        let root = "C:\\";
+        let final_component = "\\報告.txt";
+
+        let fitted = middle_ellipsis(path, root, final_component, 12.0, grapheme_width)
+            .expect("the root, ellipsis, and final component fit");
+
+        assert_eq!(fitted, "C:\\用…\\報告.txt");
+        assert!(fitted.starts_with(root));
+        assert!(fitted.ends_with(final_component));
+        assert!(fitted.graphemes(true).count() <= 12);
+    }
 
     #[test]
     fn center_gaps_and_outer_dead_zones_do_not_activate_actions() {
