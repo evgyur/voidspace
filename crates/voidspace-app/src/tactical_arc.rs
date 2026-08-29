@@ -122,10 +122,10 @@ mod primitives {
             inner_stroke: Stroke::new(2.0 * geometry_scale, fill),
             outer_bloom: Stroke::new((2.0 + 3.0 * intensity) * geometry_scale, bloom_color),
             fan_halo: FanHaloStyle {
-                radial_spread: (24.0 + 16.0 * intensity) * geometry_scale,
-                angular_spread: 0.09 + 0.07 * intensity,
+                radial_spread: (11.0 + 11.0 * intensity) * geometry_scale,
+                angular_spread: 0.045 + 0.045 * intensity,
                 color: fill,
-                opacity: 0.34 + 0.28 * intensity,
+                opacity: 0.16 + 0.16 * intensity,
             },
             label_color: ACTIVE_LABEL_INK,
             label_scale: 1.0 + (super::ACTION_TAG_PEAK_SCALE - 1.0) * label_intensity,
@@ -235,8 +235,8 @@ fn fan_halo_mesh(
     geometry_scale: f32,
     style: primitives::FanHaloStyle,
 ) -> egui::Mesh {
-    const RADIAL_STEPS: usize = 12;
-    const ANGULAR_STEPS: usize = 36;
+    const RADIAL_STEPS: usize = 24;
+    const ANGULAR_STEPS: usize = 48;
 
     let core_inner = INNER_RADIUS * geometry_scale;
     let core_outer = OUTER_RADIUS * geometry_scale;
@@ -1752,10 +1752,12 @@ mod tests {
         assert_close(peak.outer_bloom.width, 5.0 * 0.75);
         assert_eq!(baseline.fan_halo.color, ACTIVE_CYAN);
         assert_eq!(peak.fan_halo.color, ACTIVE_CYAN);
-        assert_close(baseline.fan_halo.radial_spread, 24.0 * 0.75);
-        assert_close(peak.fan_halo.radial_spread, 40.0 * 0.75);
-        assert!(peak.fan_halo.angular_spread > baseline.fan_halo.angular_spread);
-        assert!(peak.fan_halo.opacity > baseline.fan_halo.opacity);
+        assert_close(baseline.fan_halo.radial_spread, 11.0 * 0.75);
+        assert_close(peak.fan_halo.radial_spread, 22.0 * 0.75);
+        assert_close(baseline.fan_halo.angular_spread, 0.045);
+        assert_close(peak.fan_halo.angular_spread, 0.09);
+        assert_close(baseline.fan_halo.opacity, 0.16);
+        assert_close(peak.fan_halo.opacity, 0.32);
 
         let clamped = active_sector_style(ACTIVE_CYAN, 10.0, 1.0);
         assert_close(clamped.label_scale, 1.095);

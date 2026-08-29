@@ -10,18 +10,40 @@ pub fn main_viewport() -> egui::ViewportBuilder {
 
 #[derive(Debug)]
 pub(crate) struct StartupWindowSizer {
-    pending: bool,
+    phase: StartupWindowPhase,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StartupWindowPhase {
+    Resize,
+    Center,
+    Complete,
 }
 
 impl StartupWindowSizer {
     pub(crate) fn new() -> Self {
-        Self { pending: true }
+        Self {
+            phase: StartupWindowPhase::Resize,
+        }
     }
 
     pub(crate) fn apply(&mut self, context: &egui::Context) {
-        if std::mem::take(&mut self.pending) {
-            context.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
-            context.send_viewport_cmd(egui::ViewportCommand::InnerSize(STARTUP_WINDOW_SIZE));
+        match self.phase {
+            StartupWindowPhase::Resize => {
+                context.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
+                context.send_viewport_cmd(egui::ViewportCommand::InnerSize(STARTUP_WINDOW_SIZE));
+                self.phase = StartupWindowPhase::Center;
+                context.request_repaint();
+            }
+            StartupWindowPhase::Center => {
+                if let Some(command) = egui::ViewportCommand::center_on_screen(context) {
+                    context.send_viewport_cmd(command);
+                    self.phase = StartupWindowPhase::Complete;
+                } else {
+                    context.request_repaint();
+                }
+            }
+            StartupWindowPhase::Complete => {}
         }
     }
 }
@@ -39,7 +61,7 @@ mod tests {
     }
 
     #[test]
-    fn post_creation_landscape_size_is_sent_once_after_the_hidden_startup_window_exists() {
+    fn post_creation_landscape_size_is_followed_by_one_centering_command() {
         let context = egui::Context::default();
         let mut sizer = super::StartupWindowSizer::new();
         let mut first = context.run_ui(Default::default(), |ui| sizer.apply(ui.ctx()));
@@ -60,9 +82,38 @@ mod tests {
         );
         first.textures_delta.clear();
 
-        let mut second = context.run_ui(Default::default(), |ui| sizer.apply(ui.ctx()));
+        let mut input = egui::RawInput::default();
+        input.viewports.insert(
+            ViewportId::ROOT,
+            egui::ViewportInfo {
+                monitor_size: Some(egui::vec2(2560.0, 1440.0)),
+                outer_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(900.0, 400.0),
+                    egui::vec2(1456.0, 939.0),
+                )),
+                ..Default::default()
+            },
+        );
+        let mut second = context.run_ui(input, |ui| sizer.apply(ui.ctx()));
+        let second_commands = &second
+            .viewport_output
+            .get(&ViewportId::ROOT)
+            .expect("root viewport output")
+            .commands;
         assert!(
-            second
+            second_commands
+                .iter()
+                .any(|command| matches!(command, ViewportCommand::OuterPosition(position) if *position == egui::pos2(552.0, 250.5)))
+        );
+        assert!(second_commands.iter().all(|command| !matches!(
+            command,
+            ViewportCommand::Maximized(_) | ViewportCommand::InnerSize(_)
+        )));
+        second.textures_delta.clear();
+
+        let mut third = context.run_ui(Default::default(), |ui| sizer.apply(ui.ctx()));
+        assert!(
+            third
                 .viewport_output
                 .get(&ViewportId::ROOT)
                 .expect("root viewport output")
@@ -70,9 +121,11 @@ mod tests {
                 .iter()
                 .all(|command| !matches!(
                     command,
-                    ViewportCommand::Maximized(_) | ViewportCommand::InnerSize(_)
+                    ViewportCommand::Maximized(_)
+                        | ViewportCommand::InnerSize(_)
+                        | ViewportCommand::OuterPosition(_)
                 ))
         );
-        second.textures_delta.clear();
+        third.textures_delta.clear();
     }
 }
