@@ -14,6 +14,7 @@ mod treemap_state;
 mod volume;
 mod volume_display_registry;
 mod volume_switcher;
+mod window;
 
 pub use app::{VoidspaceApp, WorkspaceMode, workspace_mode};
 pub use theme::release_typography_diagnostic;
@@ -23,3 +24,4 @@ pub use volume_switcher::{
     ScopePresentation, VolumeRootKey, VolumeSwitcherAction, VolumeSwitcherState,
     repair_volume_focus,
 };
+pub use window::main_viewport;

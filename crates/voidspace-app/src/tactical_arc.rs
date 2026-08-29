@@ -9,6 +9,15 @@ const INNER_RADIUS: f32 = 42.0;
 const OUTER_RADIUS: f32 = 106.0;
 const HUB_RADIUS: f32 = 30.0;
 const SECTOR_HALF_ANGLE: f32 = 18.0_f32.to_radians();
+const ACTION_TAG_RADIUS: f32 = 112.0;
+const ACTION_TAG_WIDTH: f32 = 76.0;
+const ACTION_TAG_HEIGHT: f32 = 24.0;
+const ACTION_TAG_FONT_POINTS: f32 = 11.0;
+const ACTION_TAG_PEAK_SCALE: f32 = 1.095;
+const ACTION_TAG_SHADOW_BLUR: f32 = 22.0;
+const FAN_VISUAL_EXTENT: f32 = ACTION_TAG_RADIUS
+    + ACTION_TAG_WIDTH * 0.5 * ACTION_TAG_PEAK_SCALE
+    + ACTION_TAG_SHADOW_BLUR * 0.5;
 const TARGET_PLATE_WIDTH: f32 = 280.0;
 const TARGET_PLATE_HEIGHT: f32 = 94.0;
 const TARGET_PLATE_GAP: f32 = 12.0;
@@ -26,7 +35,7 @@ const TARGET_PLATE_BACKGROUND: Color32 = Color32::from_rgb(0x0b, 0x0f, 0x11);
 const TARGET_PLATE_BORDER: Color32 = Color32::from_rgb(0x3a, 0x44, 0x49);
 const TARGET_PLATE_MUTED: Color32 = Color32::from_rgb(0x8e, 0x94, 0x9d);
 const MODAL_SCRIM: Color32 = Color32::from_black_alpha(184);
-const TARGET_LOCK_RED: Color32 = Color32::from_rgb(0xff, 0x3b, 0x30);
+const REACTOR_HEAT: Color32 = Color32::from_rgb(0xff, 0x5a, 0x22);
 
 mod primitives {
     use egui::{Color32, Stroke};
@@ -47,10 +56,12 @@ mod primitives {
     #[derive(Clone, Copy, Debug, PartialEq)]
     pub(super) struct ActiveSectorStyle {
         pub(super) fill: Color32,
+        pub(super) tag_fill: Color32,
         pub(super) inner_stroke: Stroke,
         pub(super) outer_bloom: Stroke,
         pub(super) label_color: Color32,
         pub(super) label_scale: f32,
+        pub(super) tag_scale: f32,
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -79,23 +90,37 @@ mod primitives {
 
     #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn active_sector_style(
-        semantic_color: Color32,
+        _semantic_color: Color32,
         intensity: f32,
         geometry_scale: f32,
     ) -> ActiveSectorStyle {
         let intensity = intensity.clamp(0.0, 1.0);
         let label_intensity = (intensity * 8.0).round() / 8.0;
         let geometry_scale = geometry_scale.max(0.0);
-        let fill = Color32::from_rgb(semantic_color.r(), semantic_color.g(), semantic_color.b());
+        let fill = super::REACTOR_HEAT;
+        let brightness = 1.0 + 0.35 * intensity;
+        let brighten =
+            |channel: u8| (f32::from(channel) * brightness).round().clamp(0.0, 255.0) as u8;
+        let tag_fill = Color32::from_rgb(
+            brighten(super::REACTOR_HEAT.r()),
+            brighten(super::REACTOR_HEAT.g()),
+            brighten(super::REACTOR_HEAT.b()),
+        );
         let bloom_alpha = (72.0 + 112.0 * intensity).round() as u8;
-        let bloom_color =
-            Color32::from_rgba_unmultiplied(fill.r(), fill.g(), fill.b(), bloom_alpha);
+        let bloom_color = Color32::from_rgba_unmultiplied(
+            super::REACTOR_HEAT.r(),
+            super::REACTOR_HEAT.g(),
+            super::REACTOR_HEAT.b(),
+            bloom_alpha,
+        );
         ActiveSectorStyle {
             fill,
+            tag_fill,
             inner_stroke: Stroke::new(2.0 * geometry_scale, fill),
             outer_bloom: Stroke::new((2.0 + 3.0 * intensity) * geometry_scale, bloom_color),
             label_color: ACTIVE_LABEL_INK,
-            label_scale: 1.0 + 0.095 * label_intensity,
+            label_scale: 1.0 + (super::ACTION_TAG_PEAK_SCALE - 1.0) * label_intensity,
+            tag_scale: 1.0 + (super::ACTION_TAG_PEAK_SCALE - 1.0) * intensity,
         }
     }
 
@@ -322,7 +347,8 @@ impl TacticalArcGeometry {
     }
 
     fn fit(requested: Pos2, area: Rect, preferred_scale: f32) -> Option<Self> {
-        let composition_width = OUTER_RADIUS * 2.0 + TARGET_PLATE_GAP + TARGET_PLATE_WIDTH;
+        let composition_width =
+            FAN_VISUAL_EXTENT + OUTER_RADIUS + TARGET_PLATE_GAP + TARGET_PLATE_WIDTH;
         let composition_height = (OUTER_RADIUS * 2.0).max(TARGET_PLATE_HEIGHT);
         let full_width = composition_width * preferred_scale + SAFE_MARGIN * 2.0;
         let full_height = composition_height * preferred_scale + SAFE_MARGIN * 2.0;
@@ -345,10 +371,11 @@ impl TacticalArcGeometry {
             Orientation::Left
         };
         let fan = OUTER_RADIUS * scale;
+        let fan_visual_extent = FAN_VISUAL_EXTENT * scale;
         let plate = (OUTER_RADIUS + TARGET_PLATE_GAP + TARGET_PLATE_WIDTH) * scale;
         let (left_extent, right_extent) = match orientation {
-            Orientation::Right => (plate, fan),
-            Orientation::Left => (fan, plate),
+            Orientation::Right => (plate, fan_visual_extent),
+            Orientation::Left => (fan_visual_extent, plate),
         };
         let center = Pos2::new(
             requested.x.clamp(
@@ -372,7 +399,11 @@ impl TacticalArcGeometry {
     pub fn bounds(self) -> Rect {
         let fan = OUTER_RADIUS * self.scale;
         let circle = Rect::from_center_size(self.center, Vec2::splat(fan * 2.0));
-        circle.union(self.target_plate_rect())
+        let mut bounds = circle.union(self.target_plate_rect());
+        for index in 0..SECTORS.len() {
+            bounds = bounds.union(self.action_tag_visual_rect(index));
+        }
+        bounds
     }
 
     fn target_plate_rect(self) -> Rect {
@@ -394,12 +425,35 @@ impl TacticalArcGeometry {
         }
     }
 
+    #[cfg(test)]
     fn action_center(self, index: usize) -> Pos2 {
         let radius = (INNER_RADIUS + OUTER_RADIUS) * 0.5 * self.scale;
         self.center + Vec2::angled(self.action_angle(index)) * radius
     }
 
+    fn action_tag_rect(self, index: usize) -> Rect {
+        let center =
+            self.center + Vec2::angled(self.action_angle(index)) * (ACTION_TAG_RADIUS * self.scale);
+        Rect::from_center_size(
+            center,
+            Vec2::new(ACTION_TAG_WIDTH, ACTION_TAG_HEIGHT) * self.scale,
+        )
+    }
+
+    fn action_tag_visual_rect(self, index: usize) -> Rect {
+        let tag = self.action_tag_rect(index);
+        Rect::from_center_size(tag.center(), tag.size() * ACTION_TAG_PEAK_SCALE)
+            .expand(ACTION_TAG_SHADOW_BLUR * 0.5 * self.scale)
+    }
+
     pub fn hit_test(self, pointer: Pos2) -> Option<TacticalAction> {
+        if let Some((index, _)) = SECTORS
+            .iter()
+            .enumerate()
+            .find(|(index, _)| self.action_tag_rect(*index).contains(pointer))
+        {
+            return Some(SECTORS[index].action);
+        }
         let delta = pointer - self.center;
         let radius = delta.length();
         if radius < INNER_RADIUS * self.scale || radius > OUTER_RADIUS * self.scale {
@@ -630,60 +684,14 @@ fn animation_repaint_after(
 
 fn paint_source_target_lock(painter: &egui::Painter, rect: Rect, geometry_scale: f32) {
     let scale = geometry_scale.max(COMPACT_SCALE);
-    painter.rect_filled(
-        rect,
-        0.0,
-        Color32::from_rgba_unmultiplied(
-            TARGET_LOCK_RED.r(),
-            TARGET_LOCK_RED.g(),
-            TARGET_LOCK_RED.b(),
-            42,
-        ),
-    );
-    painter.rect_stroke(
-        rect.expand(8.0 * scale),
-        2.0 * scale,
-        Stroke::new(
-            8.0 * scale,
-            Color32::from_rgba_unmultiplied(
-                TARGET_LOCK_RED.r(),
-                TARGET_LOCK_RED.g(),
-                TARGET_LOCK_RED.b(),
-                38,
-            ),
-        ),
-        egui::StrokeKind::Inside,
-    );
-    painter.rect_stroke(
-        rect.expand(3.0 * scale),
-        1.0 * scale,
-        Stroke::new(
-            4.0 * scale,
-            Color32::from_rgba_unmultiplied(
-                TARGET_LOCK_RED.r(),
-                TARGET_LOCK_RED.g(),
-                TARGET_LOCK_RED.b(),
-                112,
-            ),
-        ),
-        egui::StrokeKind::Inside,
-    );
+    let accent = Color32::from_rgba_unmultiplied(0xff, 0x5a, 0x22, 176);
     painter.rect_stroke(
         rect,
         0.0,
-        Stroke::new(2.25 * scale, TARGET_LOCK_RED),
+        Stroke::new(1.0 * scale, accent),
         egui::StrokeKind::Inside,
     );
-    hud::paint_corner_brackets(painter, rect.shrink(4.0 * scale), TARGET_LOCK_RED);
-    if rect.width() >= 112.0 && rect.height() >= 48.0 {
-        painter.text(
-            rect.right_top() + Vec2::new(-10.0 * scale, 10.0 * scale),
-            Align2::RIGHT_TOP,
-            "TARGET LOCKED",
-            FontId::monospace(9.0 * scale),
-            TARGET_LOCK_RED,
-        );
-    }
+    hud::paint_corner_brackets(painter, rect.shrink(3.0 * scale), accent);
 }
 
 #[derive(Clone, Debug)]
@@ -1007,6 +1015,9 @@ impl TacticalArcState {
         if secondary_clicked && !opening_frame {
             chosen = Some(TacticalArcOutcome::Dismiss);
         }
+        if !secondary_clicked {
+            self.armed = true;
+        }
         if primary_clicked && let Some(pointer) = interact_pos {
             chosen = Some(
                 geometry
@@ -1022,7 +1033,6 @@ impl TacticalArcState {
 
     pub fn paint(&mut self, context: &egui::Context, font: FontId) -> Option<TacticalArcOutcome> {
         let mut plate_text_fit_failed = false;
-        self.armed = true;
         let geometry = self.geometry;
         let content_rect = context.content_rect();
         let pointer = context.pointer_hover_pos();
@@ -1062,7 +1072,10 @@ impl TacticalArcState {
             painter.rect_filled(rect, 0.0, MODAL_SCRIM);
             if let Some(source_rect) = self.source_rect {
                 let source_rect = source_rect.intersect(content_rect);
-                if source_rect.width() > 2.0 && source_rect.height() > 2.0 {
+                if source_rect.width() > 2.0
+                    && source_rect.height() > 2.0
+                    && !source_rect.intersects(draw_geometry.bounds().expand(6.0))
+                {
                     paint_source_target_lock(&painter, source_rect, draw_geometry.scale);
                 }
             }
@@ -1076,7 +1089,7 @@ impl TacticalArcState {
                             1.0
                         },
                         if self.source_rect.is_some() {
-                            TARGET_LOCK_RED
+                            REACTOR_HEAT
                         } else {
                             hud::ORANGE
                         },
@@ -1136,28 +1149,65 @@ impl TacticalArcState {
                 } else {
                     painter.add(Shape::closed_line(boundary, Stroke::new(1.0, sector.color)));
                 }
-                let action_center = draw_geometry.action_center(index);
+                let action_tag = draw_geometry.action_tag_rect(index);
+                let painted_action_tag = active_style.map_or(action_tag, |style| {
+                    Rect::from_center_size(action_tag.center(), action_tag.size() * style.tag_scale)
+                });
                 let (label_font, label_color) = active_style.map_or_else(
-                    || (font.clone(), sector.color),
+                    || {
+                        (
+                            FontId::new(
+                                ACTION_TAG_FONT_POINTS * draw_geometry.scale,
+                                font.family.clone(),
+                            ),
+                            sector.color,
+                        )
+                    },
                     |style| {
                         (
-                            FontId::new(font.size * style.label_scale, font.family.clone()),
+                            FontId::new(
+                                ACTION_TAG_FONT_POINTS * draw_geometry.scale * style.label_scale,
+                                font.family.clone(),
+                            ),
                             style.label_color,
                         )
                     },
                 );
+                if let Some(style) = active_style {
+                    let shadow = egui::epaint::Shadow {
+                        offset: [0, 0],
+                        blur: (ACTION_TAG_SHADOW_BLUR * draw_geometry.scale)
+                            .round()
+                            .clamp(0.0, 255.0) as u8,
+                        spread: 0,
+                        color: style.tag_fill,
+                    };
+                    painter.add(Shape::Rect(shadow.as_shape(painted_action_tag, 0)));
+                    painter.rect_filled(painted_action_tag, 0.0, style.tag_fill);
+                    painter.rect_stroke(
+                        painted_action_tag,
+                        0.0,
+                        style.inner_stroke,
+                        egui::StrokeKind::Inside,
+                    );
+                } else {
+                    painter.line_segment(
+                        [
+                            center + Vec2::angled(angle) * (OUTER_RADIUS * draw_geometry.scale),
+                            action_tag.center(),
+                        ],
+                        Stroke::new(draw_geometry.scale, sector.color),
+                    );
+                }
                 painter.text(
-                    action_center,
+                    painted_action_tag.center(),
                     Align2::CENTER_CENTER,
                     sector.compact_label,
                     label_font,
                     label_color,
                 );
-                let action_response = ui.interact(
-                    Rect::from_center_size(action_center, Vec2::splat(56.0 * draw_geometry.scale)),
-                    Self::action_response_id(index),
-                    Sense::click(),
-                );
+                let action_response =
+                    ui.interact(action_tag, Self::action_response_id(index), Sense::click());
                 if self.focus_request_pending
                     && self.focus_slot == Some(ModalFocusSlot::Action(index))
                 {
@@ -1578,17 +1628,22 @@ mod tests {
     }
 
     #[test]
-    fn active_style_pulses_with_its_own_semantic_bloom_and_caps_width() {
+    fn active_style_uses_reactor_heat_bloom_and_caps_width() {
         let baseline = active_sector_style(ACTIVE_CYAN, 0.0, 0.75);
         let peak = active_sector_style(ACTIVE_CYAN, 1.0, 0.75);
         assert_close(baseline.label_scale, 1.0);
         assert_close(peak.label_scale, 1.095);
-        assert_eq!(baseline.inner_stroke.color, ACTIVE_CYAN);
+        assert_close(baseline.tag_scale, 1.0);
+        assert_close(peak.tag_scale, ACTION_TAG_PEAK_SCALE);
+        assert_eq!(baseline.fill, REACTOR_HEAT);
+        assert_eq!(baseline.tag_fill, REACTOR_HEAT);
+        assert_eq!(peak.tag_fill, Color32::from_rgb(0xff, 0x7a, 0x2e));
+        assert_eq!(baseline.inner_stroke.color, REACTOR_HEAT);
         for bloom in [baseline.outer_bloom.color, peak.outer_bloom.color] {
             let [red, green, blue, _] = bloom.to_srgba_unmultiplied();
-            assert!(red.abs_diff(ACTIVE_CYAN.r()) <= 2);
-            assert!(green.abs_diff(ACTIVE_CYAN.g()) <= 2);
-            assert!(blue.abs_diff(ACTIVE_CYAN.b()) <= 2);
+            assert!(red.abs_diff(REACTOR_HEAT.r()) <= 2);
+            assert!(green.abs_diff(REACTOR_HEAT.g()) <= 2);
+            assert!(blue.abs_diff(REACTOR_HEAT.b()) <= 2);
         }
         assert!(peak.outer_bloom.color.a() > baseline.outer_bloom.color.a());
         assert_close(baseline.inner_stroke.width, 2.0 * 0.75);
@@ -1597,6 +1652,7 @@ mod tests {
 
         let clamped = active_sector_style(ACTIVE_CYAN, 10.0, 1.0);
         assert_close(clamped.label_scale, 1.095);
+        assert_close(clamped.tag_scale, ACTION_TAG_PEAK_SCALE);
         assert_close(clamped.outer_bloom.width, 5.0);
     }
 
@@ -1612,9 +1668,10 @@ mod tests {
                 let intensity = reactor_beat(phase * REACTOR_BEAT_SECONDS);
                 let style = active_sector_style(color, intensity, 1.0);
                 assert_eq!(style.fill.a(), 255);
+                assert_eq!(style.tag_fill.a(), 255);
                 assert_eq!(style.label_color, ACTIVE_LABEL_INK);
                 assert!(
-                    contrast_ratio(style.fill, style.label_color) >= 4.5,
+                    contrast_ratio(style.tag_fill, style.label_color) >= 4.5,
                     "insufficient contrast for {color:?}"
                 );
             }
@@ -1799,6 +1856,8 @@ mod tests {
         assert!(painter_clip.contains(draw_geometry.target_plate_rect().max));
         for index in 0..SECTORS.len() {
             assert!(painter_clip.contains(draw_geometry.action_center(index)));
+            assert!(painter_clip.contains(draw_geometry.action_tag_rect(index).min));
+            assert!(painter_clip.contains(draw_geometry.action_tag_rect(index).max));
         }
     }
 
@@ -1807,7 +1866,7 @@ mod tests {
         const PLATE_WIDTH: f32 = 280.0;
         const PLATE_HEIGHT: f32 = 94.0;
         const PLATE_GAP: f32 = 12.0;
-        const COMPOSITION_WIDTH: f32 = OUTER_RADIUS * 2.0 + PLATE_GAP + PLATE_WIDTH;
+        const COMPOSITION_WIDTH: f32 = FAN_VISUAL_EXTENT + OUTER_RADIUS + PLATE_GAP + PLATE_WIDTH;
         const COMPOSITION_HEIGHT: f32 = OUTER_RADIUS * 2.0;
 
         for (work_area, requested_x, expected_orientation, expected_scale) in [
@@ -1849,10 +1908,7 @@ mod tests {
             assert_close(plate.width(), PLATE_WIDTH * expected_scale);
             assert_close(plate.height(), PLATE_HEIGHT * expected_scale);
             assert_close(plate.center().y, geometry.center.y);
-            assert_close(
-                geometry.bounds().width(),
-                COMPOSITION_WIDTH * expected_scale,
-            );
+            assert!((geometry.bounds().width() - COMPOSITION_WIDTH * expected_scale).abs() < 0.001);
             assert_close(
                 geometry.bounds().height(),
                 COMPOSITION_HEIGHT * expected_scale,
@@ -1875,16 +1931,30 @@ mod tests {
 
     #[test]
     fn target_plate_fit_uses_only_the_approved_scale_floor() {
-        let exact_compact = Rect::from_min_size(Pos2::ZERO, Vec2::new(394.0, 175.0));
+        let exact_compact_width =
+            (FAN_VISUAL_EXTENT + OUTER_RADIUS + TARGET_PLATE_GAP + TARGET_PLATE_WIDTH)
+                * COMPACT_SCALE
+                + SAFE_MARGIN * 2.0;
+        let exact_compact_height = OUTER_RADIUS * 2.0 * COMPACT_SCALE + SAFE_MARGIN * 2.0;
+        let exact_compact = Rect::from_min_size(
+            Pos2::ZERO,
+            Vec2::new(exact_compact_width, exact_compact_height),
+        );
         let compact = TacticalArcGeometry::fit(exact_compact.center(), exact_compact, 1.0)
             .expect("the exact compact composition plus safe margin fits");
         assert_close(compact.scale, 0.75);
         assert!(exact_compact.contains(compact.bounds().expand(SAFE_MARGIN).min));
         assert!(exact_compact.contains(compact.bounds().expand(SAFE_MARGIN).max));
 
-        let too_narrow = Rect::from_min_size(Pos2::ZERO, Vec2::new(393.9, 175.0));
+        let too_narrow = Rect::from_min_size(
+            Pos2::ZERO,
+            Vec2::new(exact_compact_width - 0.1, exact_compact_height),
+        );
         assert!(TacticalArcGeometry::fit(too_narrow.center(), too_narrow, 1.0).is_none());
-        let too_short = Rect::from_min_size(Pos2::ZERO, Vec2::new(394.0, 174.9));
+        let too_short = Rect::from_min_size(
+            Pos2::ZERO,
+            Vec2::new(exact_compact_width, exact_compact_height - 0.1),
+        );
         assert!(TacticalArcGeometry::fit(too_short.center(), too_short, 1.0).is_none());
     }
 
@@ -2722,7 +2792,7 @@ mod tests {
     }
 
     #[test]
-    fn opening_secondary_is_ignored_but_next_secondary_dismisses_before_paint() {
+    fn repeated_opening_secondary_is_ignored_until_a_neutral_frame_then_next_click_dismisses() {
         let context = egui::Context::default();
         let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 720.0));
         let mut arc = arc_with_motion_query(|| Some(false), false);
@@ -2738,6 +2808,25 @@ mod tests {
         assert_eq!(opening_outcome, None);
         assert!(has_viewport_scrim(&opening_output, viewport));
         opening_output.textures_delta.clear();
+
+        let mut repeated_opening_outcome = None;
+        let mut repeated_opening_output = context.run_ui(
+            pointer_click_input(viewport, 1.0, pointer, egui::PointerButton::Secondary),
+            |ui| {
+                repeated_opening_outcome = arc.show(ui.ctx(), FontId::monospace(9.0));
+            },
+        );
+        assert_eq!(repeated_opening_outcome, None);
+        assert!(has_viewport_scrim(&repeated_opening_output, viewport));
+        repeated_opening_output.textures_delta.clear();
+
+        let mut neutral_outcome = None;
+        let mut neutral_output = context.run_ui(raw_input(viewport, 1.5, Some(pointer)), |ui| {
+            neutral_outcome = arc.show(ui.ctx(), FontId::monospace(9.0));
+        });
+        assert_eq!(neutral_outcome, None);
+        assert!(has_viewport_scrim(&neutral_output, viewport));
+        neutral_output.textures_delta.clear();
 
         let mut closing_outcome = None;
         let mut closing_output = context.run_ui(
@@ -2962,9 +3051,40 @@ mod tests {
         });
         let baseline_text = rendered_text_shapes(&baseline);
         let baseline_label = rendered_text(&baseline_text, "2  BIN");
-        assert_close(rendered_font_size(baseline_label), 9.0);
+        assert_close(rendered_font_size(baseline_label), ACTION_TAG_FONT_POINTS);
         assert_eq!(rendered_color(baseline_label), ACTIVE_LABEL_INK);
+        let baseline_label_center = logical_text_rect(baseline_label).center();
+        assert!(
+            baseline_label_center.distance(arc.geometry.center) > OUTER_RADIUS * arc.geometry.scale,
+            "the approved Reactor Beat label must sit on an outer command tag"
+        );
+        let baseline_shapes = leaf_shapes(&baseline);
+        let baseline_shadow = baseline_shapes.iter().find_map(|shape| match shape {
+            Shape::Rect(rect)
+                if rect.fill == REACTOR_HEAT
+                    && rect.blur_width == ACTION_TAG_SHADOW_BLUR
+                    && rect.rect.contains(baseline_label_center) =>
+            {
+                Some(rect.rect)
+            }
+            _ => None,
+        });
+        let baseline_tag = baseline_shapes.iter().find_map(|shape| match shape {
+            Shape::Rect(rect)
+                if rect.fill == REACTOR_HEAT
+                    && rect.blur_width == 0.0
+                    && rect.rect.contains(baseline_label_center) =>
+            {
+                Some(rect.rect)
+            }
+            _ => None,
+        });
         baseline.textures_delta.clear();
+        baseline_shadow.expect("Reactor Beat keeps the preview's 22 px orange box-shadow");
+        let baseline_tag =
+            baseline_tag.expect("Reactor Beat starts with the preview's opaque orange action tag");
+        assert_close(baseline_tag.width(), ACTION_TAG_WIDTH);
+        assert_close(baseline_tag.height(), ACTION_TAG_HEIGHT);
 
         let peak_time = 10.0 + f64::from(0.12 * REACTOR_BEAT_SECONDS);
         let mut settle = context.run_ui(raw_input(viewport, peak_time, None), |ui| {
@@ -2976,10 +3096,42 @@ mod tests {
         });
         let peak_text = rendered_text_shapes(&peak);
         let peak_label = rendered_text(&peak_text, "2  BIN");
-        assert_close(rendered_font_size(peak_label), 9.0 * 1.095);
+        assert_close(
+            rendered_font_size(peak_label),
+            ACTION_TAG_FONT_POINTS * 1.095,
+        );
         assert_eq!(rendered_color(peak_label), ACTIVE_LABEL_INK);
 
         let shapes = leaf_shapes(&peak);
+        let peak_shadow = shapes
+            .iter()
+            .find_map(|shape| match shape {
+                Shape::Rect(rect)
+                    if rect.fill == Color32::from_rgb(0xff, 0x7a, 0x2e)
+                        && rect.blur_width == ACTION_TAG_SHADOW_BLUR
+                        && rect.rect.contains(logical_text_rect(peak_label).center()) =>
+                {
+                    Some(rect.rect)
+                }
+                _ => None,
+            })
+            .expect("the Reactor Beat shadow brightens with the whole action tag");
+        let peak_tag = shapes
+            .iter()
+            .find_map(|shape| match shape {
+                Shape::Rect(rect)
+                    if rect.fill == Color32::from_rgb(0xff, 0x7a, 0x2e)
+                        && rect.blur_width == 0.0
+                        && rect.rect.contains(logical_text_rect(peak_label).center()) =>
+                {
+                    Some(rect.rect)
+                }
+                _ => None,
+            })
+            .expect("the whole action tag brightens at the Reactor Beat peak");
+        assert_eq!(peak_shadow, peak_tag);
+        assert!((peak_tag.width() - ACTION_TAG_WIDTH * ACTION_TAG_PEAK_SCALE).abs() < 0.001);
+        assert!((peak_tag.height() - ACTION_TAG_HEIGHT * ACTION_TAG_PEAK_SCALE).abs() < 0.001);
         let active_mesh = shapes
             .iter()
             .find_map(|shape| match shape {
@@ -2987,18 +3139,18 @@ mod tests {
                     if mesh
                         .vertices
                         .iter()
-                        .all(|vertex| vertex.color == ACTIVE_LIME) =>
+                        .all(|vertex| vertex.color == REACTOR_HEAT) =>
                 {
                     Some(mesh)
                 }
                 _ => None,
             })
-            .expect("active sector uses exact opaque semantic fill");
+            .expect("active sector uses the preview's exact opaque Reactor Heat fill");
         assert!(
             active_mesh
                 .vertices
                 .iter()
-                .all(|vertex| vertex.color.to_array() == [0xbd, 0xff, 0x3e, 0xff])
+                .all(|vertex| vertex.color.to_array() == [0xff, 0x5a, 0x22, 0xff])
         );
         let active_stroke_widths = shapes
             .iter()
@@ -3028,10 +3180,10 @@ mod tests {
     }
 
     #[test]
-    fn source_target_lock_is_static_while_sector_buttons_own_the_reactor_beat() {
+    fn source_target_lock_is_quiet_while_sector_buttons_own_the_reactor_beat() {
         let context = egui::Context::default();
         let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 720.0));
-        let source_rect = Rect::from_min_max(Pos2::new(36.0, 72.0), Pos2::new(356.0, 292.0));
+        let source_rect = Rect::from_min_max(Pos2::new(36.0, 72.0), Pos2::new(196.0, 232.0));
         let target = target_fixture("53.2 GiB", "Users", r"C:\Users", r"C:\");
         let mut arc = TacticalArcState::new_with_source_rect_and_motion_query(
             target,
@@ -3063,18 +3215,22 @@ mod tests {
         );
 
         let text = rendered_text_shapes(&output);
-        let lock_label = rendered_text(&text, "TARGET LOCKED");
-        assert_eq!(rendered_color(lock_label), TARGET_LOCK_RED);
+        assert!(
+            text.iter()
+                .all(|shape| shape.galley.text() != "TARGET LOCKED")
+        );
 
-        fn has_red_target_lock(shape: &Shape, source_rect: Rect) -> bool {
+        fn has_quiet_target_lock(shape: &Shape, source_rect: Rect) -> bool {
             match shape {
                 Shape::Vec(shapes) => shapes
                     .iter()
-                    .any(|shape| has_red_target_lock(shape, source_rect)),
+                    .any(|shape| has_quiet_target_lock(shape, source_rect)),
                 Shape::Rect(rect) => {
                     rect.rect == source_rect
-                        && rect.stroke.color == TARGET_LOCK_RED
-                        && rect.stroke.width >= 2.0
+                        && rect.fill == Color32::TRANSPARENT
+                        && rect.stroke.color
+                            == Color32::from_rgba_unmultiplied(0xff, 0x5a, 0x22, 176)
+                        && rect.stroke.width <= 1.0
                 }
                 _ => false,
             }
@@ -3083,7 +3239,7 @@ mod tests {
             output
                 .shapes
                 .iter()
-                .any(|clipped| has_red_target_lock(&clipped.shape, source_rect))
+                .any(|clipped| has_quiet_target_lock(&clipped.shape, source_rect))
         );
         assert_eq!(
             output
@@ -3116,7 +3272,7 @@ mod tests {
             });
             let text = rendered_text_shapes(&output);
             let label = rendered_text(&text, "2  BIN");
-            assert_close(rendered_font_size(label), 9.0);
+            assert_close(rendered_font_size(label), ACTION_TAG_FONT_POINTS);
             assert_eq!(rendered_color(label), ACTIVE_LABEL_INK);
             assert_eq!(
                 output
@@ -3145,7 +3301,7 @@ mod tests {
         });
         let text = rendered_text_shapes(&output);
         let label = rendered_text(&text, "1  OPEN");
-        assert_close(rendered_font_size(label), 9.0);
+        assert_close(rendered_font_size(label), ACTION_TAG_FONT_POINTS);
         assert_eq!(rendered_color(label), ACTIVE_LABEL_INK);
         assert_eq!(
             output
@@ -3449,7 +3605,7 @@ mod tests {
             sizes.len() <= 9,
             "unbounded rendered font variants: {sizes:?}"
         );
-        assert!(sizes.contains(&9.0));
-        assert!(sizes.contains(&(9.0 * 1.095)));
+        assert!(sizes.contains(&ACTION_TAG_FONT_POINTS));
+        assert!(sizes.contains(&(ACTION_TAG_FONT_POINTS * 1.095)));
     }
 }
