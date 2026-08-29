@@ -90,29 +90,22 @@ mod primitives {
 
     #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn active_sector_style(
-        _semantic_color: Color32,
+        semantic_color: Color32,
         intensity: f32,
         geometry_scale: f32,
     ) -> ActiveSectorStyle {
         let intensity = intensity.clamp(0.0, 1.0);
         let label_intensity = (intensity * 8.0).round() / 8.0;
         let geometry_scale = geometry_scale.max(0.0);
-        let fill = super::REACTOR_HEAT;
+        let fill = Color32::from_rgb(semantic_color.r(), semantic_color.g(), semantic_color.b());
         let brightness = 1.0 + 0.35 * intensity;
         let brighten =
             |channel: u8| (f32::from(channel) * brightness).round().clamp(0.0, 255.0) as u8;
-        let tag_fill = Color32::from_rgb(
-            brighten(super::REACTOR_HEAT.r()),
-            brighten(super::REACTOR_HEAT.g()),
-            brighten(super::REACTOR_HEAT.b()),
-        );
+        let tag_fill =
+            Color32::from_rgb(brighten(fill.r()), brighten(fill.g()), brighten(fill.b()));
         let bloom_alpha = (72.0 + 112.0 * intensity).round() as u8;
-        let bloom_color = Color32::from_rgba_unmultiplied(
-            super::REACTOR_HEAT.r(),
-            super::REACTOR_HEAT.g(),
-            super::REACTOR_HEAT.b(),
-            bloom_alpha,
-        );
+        let bloom_color =
+            Color32::from_rgba_unmultiplied(fill.r(), fill.g(), fill.b(), bloom_alpha);
         ActiveSectorStyle {
             fill,
             tag_fill,
@@ -1628,22 +1621,22 @@ mod tests {
     }
 
     #[test]
-    fn active_style_uses_reactor_heat_bloom_and_caps_width() {
+    fn active_style_uses_semantic_reactor_beat_color_and_caps_bloom_width() {
         let baseline = active_sector_style(ACTIVE_CYAN, 0.0, 0.75);
         let peak = active_sector_style(ACTIVE_CYAN, 1.0, 0.75);
         assert_close(baseline.label_scale, 1.0);
         assert_close(peak.label_scale, 1.095);
         assert_close(baseline.tag_scale, 1.0);
         assert_close(peak.tag_scale, ACTION_TAG_PEAK_SCALE);
-        assert_eq!(baseline.fill, REACTOR_HEAT);
-        assert_eq!(baseline.tag_fill, REACTOR_HEAT);
-        assert_eq!(peak.tag_fill, Color32::from_rgb(0xff, 0x7a, 0x2e));
-        assert_eq!(baseline.inner_stroke.color, REACTOR_HEAT);
+        assert_eq!(baseline.fill, ACTIVE_CYAN);
+        assert_eq!(baseline.tag_fill, ACTIVE_CYAN);
+        assert_eq!(peak.tag_fill, Color32::from_rgb(0x29, 0xff, 0xff));
+        assert_eq!(baseline.inner_stroke.color, ACTIVE_CYAN);
         for bloom in [baseline.outer_bloom.color, peak.outer_bloom.color] {
             let [red, green, blue, _] = bloom.to_srgba_unmultiplied();
-            assert!(red.abs_diff(REACTOR_HEAT.r()) <= 2);
-            assert!(green.abs_diff(REACTOR_HEAT.g()) <= 2);
-            assert!(blue.abs_diff(REACTOR_HEAT.b()) <= 2);
+            assert!(red.abs_diff(ACTIVE_CYAN.r()) <= 2);
+            assert!(green.abs_diff(ACTIVE_CYAN.g()) <= 2);
+            assert!(blue.abs_diff(ACTIVE_CYAN.b()) <= 2);
         }
         assert!(peak.outer_bloom.color.a() > baseline.outer_bloom.color.a());
         assert_close(baseline.inner_stroke.width, 2.0 * 0.75);
@@ -3061,7 +3054,7 @@ mod tests {
         let baseline_shapes = leaf_shapes(&baseline);
         let baseline_shadow = baseline_shapes.iter().find_map(|shape| match shape {
             Shape::Rect(rect)
-                if rect.fill == REACTOR_HEAT
+                if rect.fill == ACTIVE_LIME
                     && rect.blur_width == ACTION_TAG_SHADOW_BLUR
                     && rect.rect.contains(baseline_label_center) =>
             {
@@ -3071,7 +3064,7 @@ mod tests {
         });
         let baseline_tag = baseline_shapes.iter().find_map(|shape| match shape {
             Shape::Rect(rect)
-                if rect.fill == REACTOR_HEAT
+                if rect.fill == ACTIVE_LIME
                     && rect.blur_width == 0.0
                     && rect.rect.contains(baseline_label_center) =>
             {
@@ -3080,9 +3073,9 @@ mod tests {
             _ => None,
         });
         baseline.textures_delta.clear();
-        baseline_shadow.expect("Reactor Beat keeps the preview's 22 px orange box-shadow");
-        let baseline_tag =
-            baseline_tag.expect("Reactor Beat starts with the preview's opaque orange action tag");
+        baseline_shadow.expect("Reactor Beat keeps the preview's 22 px sector-colored box-shadow");
+        let baseline_tag = baseline_tag
+            .expect("Reactor Beat starts with the preview's opaque semantic action tag");
         assert_close(baseline_tag.width(), ACTION_TAG_WIDTH);
         assert_close(baseline_tag.height(), ACTION_TAG_HEIGHT);
 
@@ -3107,7 +3100,7 @@ mod tests {
             .iter()
             .find_map(|shape| match shape {
                 Shape::Rect(rect)
-                    if rect.fill == Color32::from_rgb(0xff, 0x7a, 0x2e)
+                    if rect.fill == Color32::from_rgb(0xff, 0xff, 0x54)
                         && rect.blur_width == ACTION_TAG_SHADOW_BLUR
                         && rect.rect.contains(logical_text_rect(peak_label).center()) =>
                 {
@@ -3120,7 +3113,7 @@ mod tests {
             .iter()
             .find_map(|shape| match shape {
                 Shape::Rect(rect)
-                    if rect.fill == Color32::from_rgb(0xff, 0x7a, 0x2e)
+                    if rect.fill == Color32::from_rgb(0xff, 0xff, 0x54)
                         && rect.blur_width == 0.0
                         && rect.rect.contains(logical_text_rect(peak_label).center()) =>
                 {
@@ -3139,18 +3132,18 @@ mod tests {
                     if mesh
                         .vertices
                         .iter()
-                        .all(|vertex| vertex.color == REACTOR_HEAT) =>
+                        .all(|vertex| vertex.color == ACTIVE_LIME) =>
                 {
                     Some(mesh)
                 }
                 _ => None,
             })
-            .expect("active sector uses the preview's exact opaque Reactor Heat fill");
+            .expect("active sector keeps its exact opaque semantic fill");
         assert!(
             active_mesh
                 .vertices
                 .iter()
-                .all(|vertex| vertex.color.to_array() == [0xff, 0x5a, 0x22, 0xff])
+                .all(|vertex| vertex.color.to_array() == [0xbd, 0xff, 0x3e, 0xff])
         );
         let active_stroke_widths = shapes
             .iter()

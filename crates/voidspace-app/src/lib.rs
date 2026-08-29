@@ -4,6 +4,7 @@ mod app;
 pub mod diagnostics;
 pub mod hud;
 mod overlay_coordinator;
+mod recycle_bin;
 pub mod settings;
 mod shell;
 mod status_bar;

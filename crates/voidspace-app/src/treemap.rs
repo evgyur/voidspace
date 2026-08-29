@@ -751,8 +751,10 @@ pub fn show(ui: &mut Ui, request: ShowRequest<'_>) -> TreemapResponse {
         }
         let parent_rect = parent.rect;
         if preview.pinned == Some(parent.node_id) {
+            let object_locked =
+                object_lock_badge_visible(parent_rect, selected == Some(parent.node_id));
             painter.text(
-                parent_rect.right_top() + egui::vec2(-8.0, 8.0),
+                parent_rect.right_top() + egui::vec2(-8.0, pinned_badge_offset_y(object_locked)),
                 Align2::RIGHT_TOP,
                 "PINNED",
                 typography.font(theme::TypographyToken::DataMicro),
@@ -1095,6 +1097,14 @@ fn can_preview(snapshot: &IndexSnapshot, node: &LayoutNode) -> bool {
             .is_some_and(|index_node| !index_node.children.is_empty())
 }
 
+fn object_lock_badge_visible(rect: Rect, selected: bool) -> bool {
+    selected && rect.width() >= 118.0 && rect.height() >= 54.0
+}
+
+fn pinned_badge_offset_y(object_locked: bool) -> f32 {
+    if object_locked { 20.0 } else { 8.0 }
+}
+
 fn visual_rect(rect: LayoutRect, clip: Rect) -> Rect {
     Rect::from_min_max(
         Pos2::new(rect.min_x, rect.min_y),
@@ -1164,7 +1174,7 @@ fn paint_tile(
     }
     if selected == Some(node.node_id) {
         hud::paint_corner_brackets(painter, rect.shrink(3.0), theme::ORANGE);
-        if rect.width() >= 118.0 && rect.height() >= 54.0 {
+        if object_lock_badge_visible(rect, true) {
             painter.text(
                 rect.right_top() + Vec2::new(-8.0, 8.0),
                 Align2::RIGHT_TOP,
@@ -1289,6 +1299,13 @@ fn blend(foreground: Color32, background: Color32, amount: f32) -> Color32 {
 #[cfg(test)]
 mod interaction_tests {
     use super::*;
+
+    #[test]
+    fn pinned_badge_moves_below_object_lock_when_both_apply() {
+        assert_eq!(pinned_badge_offset_y(false), 8.0);
+        assert!(pinned_badge_offset_y(true) >= 20.0);
+        assert!(pinned_badge_offset_y(true) - 8.0 >= 12.0);
+    }
     use crate::TreemapState;
 
     #[test]

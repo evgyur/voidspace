@@ -29,6 +29,7 @@ use crate::{
     theme, treemap, volume,
     volume_display_registry::VolumeDisplayRegistry,
     volume_switcher::{self, VolumeRootKey, VolumeSwitcherAction, VolumeSwitcherState},
+    window::StartupMaximizer,
 };
 
 const MAX_SCAN_EVENTS_PER_FRAME: usize = 2_048;
@@ -296,6 +297,7 @@ fn delete_dispatch(kind: OperationKind) -> DeleteDispatch {
 }
 
 pub struct VoidspaceApp {
+    startup_maximizer: StartupMaximizer,
     typography: theme::Typography,
     volume_switcher: VolumeSwitcherState,
     tabs: Vec<ScanTab>,
@@ -338,6 +340,7 @@ impl VoidspaceApp {
         let (fileop_tx, fileop_rx) = bounded(4);
         let (volume_refresh_tx, volume_refresh_rx) = bounded(1);
         let mut app = Self {
+            startup_maximizer: StartupMaximizer::new(),
             typography,
             volume_switcher: VolumeSwitcherState::default(),
             tabs: Vec::new(),
@@ -686,6 +689,7 @@ impl VoidspaceApp {
         };
         let mut open_about = false;
         let mut open_filter = false;
+        let mut empty_recycle_bin = false;
         egui::Panel::top("topbar")
             .exact_size(62.0)
             .frame(
@@ -704,10 +708,10 @@ impl VoidspaceApp {
                         egui::Label::new(theme::brand_wordmark(&self.typography)),
                     );
                     let utility_width = if compact {
-                        compact_filter_width + 96.0 + 30.0
+                        compact_filter_width + 96.0 + 48.0 + 30.0
                     } else {
-                        260.0 + 116.0 + 64.0
-                    } + ui.spacing().item_spacing.x * 4.0;
+                        260.0 + 116.0 + 92.0 + 64.0
+                    } + ui.spacing().item_spacing.x * 5.0;
                     let scope_width = (ui.available_width() - utility_width).max(130.0);
                     ui.allocate_ui(egui::vec2(scope_width, 36.0), |ui| {
                         ui.set_width(scope_width);
@@ -785,6 +789,23 @@ impl VoidspaceApp {
                     .on_hover_text("Voidspace is already running with administrator privileges");
                     if ui
                         .add_sized(
+                            [if compact { 48.0 } else { 92.0 }, 38.0],
+                            egui::Button::new(
+                                egui::RichText::new(if compact { "BIN" } else { "EMPTY BIN" })
+                                    .font(self.typography.font(theme::TypographyToken::DataCompact))
+                                    .color(hud::MAGENTA),
+                            )
+                            .fill(hud::PANEL_RAISED),
+                        )
+                        .on_hover_text(
+                            "Empty the Windows Recycle Bin · Windows will ask for confirmation",
+                        )
+                        .clicked()
+                    {
+                        empty_recycle_bin = true;
+                    }
+                    if ui
+                        .add_sized(
                             [if compact { 30.0 } else { 64.0 }, 38.0],
                             egui::Button::new(
                                 egui::RichText::new(if compact { "i" } else { "ABOUT" }).font(
@@ -806,6 +827,13 @@ impl VoidspaceApp {
                 self.overlays.close_transient(root_ui.ctx());
             } else {
                 self.overlays.open_transient(TransientOverlay::About, None);
+            }
+        }
+        if empty_recycle_bin {
+            self.volume_switcher.open = false;
+            match crate::recycle_bin::empty_with_windows_confirmation() {
+                Ok(()) => self.toast = Some("Recycle Bin emptied".to_owned()),
+                Err(error) => self.toast = Some(error),
             }
         }
         if open_filter {
@@ -2483,6 +2511,7 @@ fn scan_batch_exhausted(processed: usize, elapsed: Duration) -> bool {
 
 impl eframe::App for VoidspaceApp {
     fn logic(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
+        self.startup_maximizer.apply(context);
         self.update_workers(context);
     }
 
@@ -2898,6 +2927,7 @@ mod tactical_arc_frame_routing_tests {
         overlays.open_transient(TransientOverlay::TacticalArc, Some(origin_focus));
         context.memory_mut(|memory| memory.request_focus(origin_focus));
         VoidspaceApp {
+            startup_maximizer: StartupMaximizer::new(),
             typography: theme::install(context),
             volume_switcher: VolumeSwitcherState::default(),
             tabs: vec![tab],
