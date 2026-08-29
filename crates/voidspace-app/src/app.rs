@@ -29,7 +29,7 @@ use crate::{
     theme, treemap, volume,
     volume_display_registry::VolumeDisplayRegistry,
     volume_switcher::{self, VolumeRootKey, VolumeSwitcherAction, VolumeSwitcherState},
-    window::StartupMaximizer,
+    window::StartupWindowSizer,
 };
 
 const MAX_SCAN_EVENTS_PER_FRAME: usize = 2_048;
@@ -297,7 +297,7 @@ fn delete_dispatch(kind: OperationKind) -> DeleteDispatch {
 }
 
 pub struct VoidspaceApp {
-    startup_maximizer: StartupMaximizer,
+    startup_window_sizer: StartupWindowSizer,
     typography: theme::Typography,
     volume_switcher: VolumeSwitcherState,
     tabs: Vec<ScanTab>,
@@ -340,7 +340,7 @@ impl VoidspaceApp {
         let (fileop_tx, fileop_rx) = bounded(4);
         let (volume_refresh_tx, volume_refresh_rx) = bounded(1);
         let mut app = Self {
-            startup_maximizer: StartupMaximizer::new(),
+            startup_window_sizer: StartupWindowSizer::new(),
             typography,
             volume_switcher: VolumeSwitcherState::default(),
             tabs: Vec::new(),
@@ -2511,7 +2511,7 @@ fn scan_batch_exhausted(processed: usize, elapsed: Duration) -> bool {
 
 impl eframe::App for VoidspaceApp {
     fn logic(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
-        self.startup_maximizer.apply(context);
+        self.startup_window_sizer.apply(context);
         self.update_workers(context);
     }
 
@@ -2927,7 +2927,7 @@ mod tactical_arc_frame_routing_tests {
         overlays.open_transient(TransientOverlay::TacticalArc, Some(origin_focus));
         context.memory_mut(|memory| memory.request_focus(origin_focus));
         VoidspaceApp {
-            startup_maximizer: StartupMaximizer::new(),
+            startup_window_sizer: StartupWindowSizer::new(),
             typography: theme::install(context),
             volume_switcher: VolumeSwitcherState::default(),
             tabs: vec![tab],

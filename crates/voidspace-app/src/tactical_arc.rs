@@ -54,11 +54,21 @@ mod primitives {
 
     #[cfg_attr(not(test), allow(dead_code))]
     #[derive(Clone, Copy, Debug, PartialEq)]
+    pub(super) struct FanHaloStyle {
+        pub(super) radial_spread: f32,
+        pub(super) angular_spread: f32,
+        pub(super) color: Color32,
+        pub(super) opacity: f32,
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[derive(Clone, Copy, Debug, PartialEq)]
     pub(super) struct ActiveSectorStyle {
         pub(super) fill: Color32,
         pub(super) tag_fill: Color32,
         pub(super) inner_stroke: Stroke,
         pub(super) outer_bloom: Stroke,
+        pub(super) fan_halo: FanHaloStyle,
         pub(super) label_color: Color32,
         pub(super) label_scale: f32,
         pub(super) tag_scale: f32,
@@ -111,6 +121,12 @@ mod primitives {
             tag_fill,
             inner_stroke: Stroke::new(2.0 * geometry_scale, fill),
             outer_bloom: Stroke::new((2.0 + 3.0 * intensity) * geometry_scale, bloom_color),
+            fan_halo: FanHaloStyle {
+                radial_spread: (24.0 + 16.0 * intensity) * geometry_scale,
+                angular_spread: 0.09 + 0.07 * intensity,
+                color: fill,
+                opacity: 0.34 + 0.28 * intensity,
+            },
             label_color: ACTIVE_LABEL_INK,
             label_scale: 1.0 + (super::ACTION_TAG_PEAK_SCALE - 1.0) * label_intensity,
             tag_scale: 1.0 + (super::ACTION_TAG_PEAK_SCALE - 1.0) * intensity,
@@ -207,6 +223,77 @@ mod primitives {
 }
 
 use primitives::{ACTIVE_CYAN, ACTIVE_LIME, ACTIVE_MAGENTA};
+
+fn smoothstep_unit(value: f32) -> f32 {
+    let value = value.clamp(0.0, 1.0);
+    value * value * (3.0 - 2.0 * value)
+}
+
+fn fan_halo_mesh(
+    center: Pos2,
+    angle: f32,
+    geometry_scale: f32,
+    style: primitives::FanHaloStyle,
+) -> egui::Mesh {
+    const RADIAL_STEPS: usize = 12;
+    const ANGULAR_STEPS: usize = 36;
+
+    let core_inner = INNER_RADIUS * geometry_scale;
+    let core_outer = OUTER_RADIUS * geometry_scale;
+    let inner = (core_inner - style.radial_spread).max(0.0);
+    let outer = core_outer + style.radial_spread;
+    let half_angle = SECTOR_HALF_ANGLE + style.angular_spread;
+    let mut mesh = egui::Mesh::default();
+
+    for radial_index in 0..=RADIAL_STEPS {
+        let radial_fraction = radial_index as f32 / RADIAL_STEPS as f32;
+        let radius = inner + (outer - inner) * radial_fraction;
+        let radial_weight = if radius < core_inner {
+            1.0 - (core_inner - radius) / style.radial_spread
+        } else if radius > core_outer {
+            1.0 - (radius - core_outer) / style.radial_spread
+        } else {
+            1.0
+        };
+
+        for angular_index in 0..=ANGULAR_STEPS {
+            let angular_fraction = angular_index as f32 / ANGULAR_STEPS as f32;
+            let local_angle = -half_angle + half_angle * 2.0 * angular_fraction;
+            let angular_weight = if local_angle.abs() > SECTOR_HALF_ANGLE {
+                1.0 - (local_angle.abs() - SECTOR_HALF_ANGLE) / style.angular_spread
+            } else {
+                1.0
+            };
+            let alpha = (style.opacity
+                * smoothstep_unit(radial_weight)
+                * smoothstep_unit(angular_weight)
+                * 255.0)
+                .round() as u8;
+            mesh.colored_vertex(
+                center + Vec2::angled(angle + local_angle) * radius,
+                Color32::from_rgba_unmultiplied(
+                    style.color.r(),
+                    style.color.g(),
+                    style.color.b(),
+                    alpha,
+                ),
+            );
+        }
+    }
+
+    let row = ANGULAR_STEPS + 1;
+    for radial_index in 0..RADIAL_STEPS {
+        for angular_index in 0..ANGULAR_STEPS {
+            let inner_start = (radial_index * row + angular_index) as u32;
+            let inner_end = inner_start + 1;
+            let outer_start = inner_start + row as u32;
+            let outer_end = outer_start + 1;
+            mesh.add_triangle(inner_start, outer_start, outer_end);
+            mesh.add_triangle(inner_start, outer_end, inner_end);
+        }
+    }
+    mesh
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContextTarget {
@@ -1093,6 +1180,34 @@ impl TacticalArcState {
                 painter.line_segment([center, pointer], Stroke::new(1.5, hud::CYAN));
             }
 
+            let visual_active_style = visual_active_action.and_then(|action| {
+                SECTORS
+                    .iter()
+                    .find(|sector| sector.action == action)
+                    .map(|sector| {
+                        let intensity = if hovered == Some(action) {
+                            pointer_beat_intensity
+                        } else {
+                            0.0
+                        };
+                        primitives::active_sector_style(
+                            sector.color,
+                            intensity,
+                            draw_geometry.scale,
+                        )
+                    })
+            });
+            if let Some(style) = visual_active_style {
+                for index in 0..SECTORS.len() {
+                    painter.add(Shape::mesh(fan_halo_mesh(
+                        center,
+                        draw_geometry.action_angle(index),
+                        draw_geometry.scale,
+                        style.fan_halo,
+                    )));
+                }
+            }
+
             for (index, sector) in SECTORS.iter().enumerate() {
                 let active = visual_active_action == Some(sector.action);
                 let angle = draw_geometry.action_angle(index);
@@ -1106,14 +1221,7 @@ impl TacticalArcState {
                     inner_points
                         .push(center + Vec2::angled(sample) * (INNER_RADIUS * draw_geometry.scale));
                 }
-                let active_style = active.then(|| {
-                    let intensity = if hovered == Some(sector.action) {
-                        pointer_beat_intensity
-                    } else {
-                        0.0
-                    };
-                    primitives::active_sector_style(sector.color, intensity, draw_geometry.scale)
-                });
+                let active_style = if active { visual_active_style } else { None };
                 let fill = if let Some(style) = active_style {
                     style.fill
                 } else {
@@ -1642,6 +1750,12 @@ mod tests {
         assert_close(baseline.inner_stroke.width, 2.0 * 0.75);
         assert!(baseline.outer_bloom.width <= 5.0 * 0.75);
         assert_close(peak.outer_bloom.width, 5.0 * 0.75);
+        assert_eq!(baseline.fan_halo.color, ACTIVE_CYAN);
+        assert_eq!(peak.fan_halo.color, ACTIVE_CYAN);
+        assert_close(baseline.fan_halo.radial_spread, 24.0 * 0.75);
+        assert_close(peak.fan_halo.radial_spread, 40.0 * 0.75);
+        assert!(peak.fan_halo.angular_spread > baseline.fan_halo.angular_spread);
+        assert!(peak.fan_halo.opacity > baseline.fan_halo.opacity);
 
         let clamped = active_sector_style(ACTIVE_CYAN, 10.0, 1.0);
         assert_close(clamped.label_scale, 1.095);
@@ -3030,7 +3144,7 @@ mod tests {
     }
 
     #[test]
-    fn pointer_hover_renders_saturated_pulsing_label_and_layered_bounded_glow() {
+    fn pointer_hover_renders_saturated_label_and_continuous_fan_gradient_glow() {
         let context = egui::Context::default();
         let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 720.0));
         let mut arc = arc_with_motion_query(|| Some(true), false);
@@ -3072,6 +3186,38 @@ mod tests {
             }
             _ => None,
         });
+        let baseline_gradient_meshes = baseline_shapes
+            .iter()
+            .filter_map(|shape| match shape {
+                Shape::Mesh(mesh)
+                    if mesh.vertices.len() > 300
+                        && mesh.vertices.iter().any(|vertex| vertex.color.a() == 0)
+                        && mesh.vertices.iter().any(|vertex| vertex.color.a() > 0)
+                        && mesh.vertices.iter().all(|vertex| vertex.color.a() < 255) =>
+                {
+                    Some(mesh)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(baseline_gradient_meshes.len(), SECTORS.len());
+        for mesh in &baseline_gradient_meshes {
+            let distinct_alpha = mesh
+                .vertices
+                .iter()
+                .map(|vertex| vertex.color.a())
+                .collect::<std::collections::BTreeSet<_>>();
+            assert!(
+                distinct_alpha.len() > 8,
+                "halo must be a continuous gradient"
+            );
+        }
+        let baseline_peak_alpha = baseline_gradient_meshes
+            .iter()
+            .flat_map(|mesh| mesh.vertices.iter())
+            .map(|vertex| vertex.color.a())
+            .max()
+            .expect("baseline gradient alpha");
         baseline.textures_delta.clear();
         baseline_shadow.expect("Reactor Beat keeps the preview's 22 px sector-colored box-shadow");
         let baseline_tag = baseline_tag
@@ -3123,6 +3269,28 @@ mod tests {
             })
             .expect("the whole action tag brightens at the Reactor Beat peak");
         assert_eq!(peak_shadow, peak_tag);
+        let peak_gradient_meshes = shapes
+            .iter()
+            .filter_map(|shape| match shape {
+                Shape::Mesh(mesh)
+                    if mesh.vertices.len() > 300
+                        && mesh.vertices.iter().any(|vertex| vertex.color.a() == 0)
+                        && mesh.vertices.iter().any(|vertex| vertex.color.a() > 0)
+                        && mesh.vertices.iter().all(|vertex| vertex.color.a() < 255) =>
+                {
+                    Some(mesh)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(peak_gradient_meshes.len(), SECTORS.len());
+        let peak_alpha = peak_gradient_meshes
+            .iter()
+            .flat_map(|mesh| mesh.vertices.iter())
+            .map(|vertex| vertex.color.a())
+            .max()
+            .expect("peak gradient alpha");
+        assert!(peak_alpha > baseline_peak_alpha);
         assert!((peak_tag.width() - ACTION_TAG_WIDTH * ACTION_TAG_PEAK_SCALE).abs() < 0.001);
         assert!((peak_tag.height() - ACTION_TAG_HEIGHT * ACTION_TAG_PEAK_SCALE).abs() < 0.001);
         let active_mesh = shapes
