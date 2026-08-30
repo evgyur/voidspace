@@ -1,5 +1,5 @@
 use std::{
-    path::PathBuf,
+    path::{Component, Path, PathBuf},
     time::{Duration, Instant},
 };
 
@@ -15,7 +15,10 @@ use voidspace_index::{Index, IndexSnapshot};
 use voidspace_layout::{
     LayoutSnapshot, Rect as LayoutRect, SizeMode, ViewState, layout, layout_subset,
 };
-use voidspace_model::{DirtySet, EventEnvelope, EventPayload, NodeId, WinName};
+use voidspace_model::{
+    DirtySet, EventEnvelope, EventPayload, MODEL_SCHEMA_VERSION, NodeId, ProducerId, RemoveNode,
+    WinName,
+};
 use voidspace_scan::{ScanHandle, ScanRequest, describe_root, start};
 use voidspace_watch::{WatchHandle, WatchRequest, WatchSignal, watch};
 
@@ -34,6 +37,8 @@ use crate::{
 
 const MAX_SCAN_EVENTS_PER_FRAME: usize = 2_048;
 const MAX_SCAN_WORK_PER_FRAME: Duration = Duration::from_millis(5);
+const FILEOP_PRODUCER: ProducerId = ProducerId(2);
+const FILEOP_WATCH_SUPPRESSION: Duration = Duration::from_secs(2);
 const VOLUME_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
 const VOLUME_CARD_MIN_WIDTH: f32 = 280.0;
 const VOLUME_CARD_HEIGHT: f32 = 148.0;
@@ -90,9 +95,38 @@ struct ScanTab {
     treemap_state: TreemapState,
     pending_rescan: bool,
     last_watch_event: Option<Instant>,
+    local_event_sequence: u64,
+    watch_suppression: Option<WatchSuppression>,
     errors: Vec<String>,
     volume_usage: Option<volume::VolumeUsage>,
     pending_navigation: Option<TreemapBookmark>,
+}
+
+#[derive(Clone, Debug)]
+struct WatchSuppression {
+    paths: Vec<PathBuf>,
+    until: Instant,
+}
+
+impl WatchSuppression {
+    fn for_deleted_paths(paths: Vec<PathBuf>) -> Self {
+        Self {
+            paths,
+            until: Instant::now() + FILEOP_WATCH_SUPPRESSION,
+        }
+    }
+
+    fn suppresses(&self, event_paths: &[PathBuf]) -> bool {
+        Instant::now() <= self.until
+            && !event_paths.is_empty()
+            && event_paths.iter().all(|event_path| {
+                self.paths.iter().any(|deleted_path| {
+                    event_path == deleted_path
+                        || event_path.starts_with(deleted_path)
+                        || deleted_path.parent() == Some(event_path.as_path())
+                })
+            })
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -220,6 +254,96 @@ fn restore_aggregate(
 }
 
 impl ScanTab {
+    fn publish_index_snapshot(&mut self) {
+        self.snapshot = self.index.snapshot();
+        if let Some(bookmark) = self.pending_navigation.as_ref() {
+            self.treemap_state = bookmark.clone().restore(&self.snapshot);
+        } else {
+            let snapshot = &self.snapshot;
+            self.treemap_state.repair(
+                |id| snapshot.node(id).is_some(),
+                |id| snapshot.node(id).and_then(|node| node.parent),
+            );
+        }
+    }
+
+    fn relative_deleted_path(&self, path: &Path) -> Option<PathBuf> {
+        path.strip_prefix(&self.root_path)
+            .ok()
+            .map(Path::to_path_buf)
+            .or_else(|| {
+                let canonical_root = std::fs::canonicalize(&self.root_path).ok()?;
+                path.strip_prefix(canonical_root)
+                    .ok()
+                    .map(Path::to_path_buf)
+            })
+    }
+
+    fn indexed_node_for_relative_path(&self, relative: &Path) -> Option<NodeId> {
+        let mut current = self.index.root();
+        let mut saw_component = false;
+        for component in relative.components() {
+            let Component::Normal(component) = component else {
+                if component == Component::CurDir {
+                    continue;
+                }
+                return None;
+            };
+            saw_component = true;
+            #[cfg(windows)]
+            let name = WinName::from_os_str(component).ok()?;
+            #[cfg(not(windows))]
+            let name = WinName::from(component.to_string_lossy().into_owned());
+            current = self.index.find_child(current, &name)?;
+        }
+        saw_component.then_some(current)
+    }
+
+    fn apply_deleted_path(&mut self, path: &Path) -> Result<bool, String> {
+        let Some(relative) = self.relative_deleted_path(path) else {
+            return Ok(false);
+        };
+        let Some(node_id) = self.indexed_node_for_relative_path(&relative) else {
+            return Ok(false);
+        };
+        let Some(node) = self.index.node(node_id).cloned() else {
+            return Ok(false);
+        };
+        let Some(parent) = node.parent.and_then(|id| self.index.node(id)).cloned() else {
+            return Ok(false);
+        };
+        self.local_event_sequence = self.local_event_sequence.saturating_add(1);
+        let dirty = self
+            .index
+            .apply(EventEnvelope {
+                schema_version: MODEL_SCHEMA_VERSION,
+                scan_id: self.snapshot.scan_id,
+                generation: self.generation,
+                branch_epoch: None,
+                producer: FILEOP_PRODUCER,
+                sequence: self.local_event_sequence,
+                observed_at_qpc: self.local_event_sequence,
+                cause_operation: None,
+                payload: EventPayload::RemoveNode(RemoveNode {
+                    parent: parent.identity,
+                    identity: node.identity,
+                    name: node.name,
+                }),
+            })
+            .map_err(|error| error.to_string())?;
+        if dirty.is_empty() {
+            return Ok(false);
+        }
+        self.publish_index_snapshot();
+        self.pending_rescan = false;
+        self.last_watch_event = None;
+        let mut suppressed_paths = vec![path.to_path_buf(), self.root_path.join(relative)];
+        suppressed_paths.sort();
+        suppressed_paths.dedup();
+        self.watch_suppression = Some(WatchSuppression::for_deleted_paths(suppressed_paths));
+        Ok(true)
+    }
+
     fn apply_treemap_action(&mut self, action: TreemapAction) {
         match action {
             TreemapAction::Zoom(target) => {
@@ -485,6 +609,8 @@ impl VoidspaceApp {
             files_seen: 0,
             pending_rescan: false,
             last_watch_event: None,
+            local_event_sequence: 0,
+            watch_suppression: None,
             errors: Vec::new(),
             volume_usage,
             pending_navigation: None,
@@ -530,8 +656,26 @@ impl VoidspaceApp {
             self.fileop_running = false;
             match result {
                 Ok(report) => {
+                    let mut updated_tabs = Vec::new();
+                    for (tab_index, tab) in self.tabs.iter_mut().enumerate() {
+                        let mut updated = false;
+                        for deleted_path in &report.deleted {
+                            match tab.apply_deleted_path(deleted_path) {
+                                Ok(applied) => updated |= applied,
+                                Err(error) => tab.errors.push(error),
+                            }
+                        }
+                        if updated {
+                            tab.volume_usage = volume::query(&tab.root_path);
+                            updated_tabs.push(tab_index);
+                        }
+                    }
                     self.toast = Some(if report.failed.is_empty() {
-                        format!("Removed {} item(s)", report.deleted.len())
+                        if updated_tabs.is_empty() {
+                            format!("Removed {} item(s)", report.deleted.len())
+                        } else {
+                            format!("Removed {} item(s) · MAP UPDATED", report.deleted.len())
+                        }
                     } else {
                         format!(
                             "Removed {}; {} failed",
@@ -539,20 +683,28 @@ impl VoidspaceApp {
                             report.failed.len()
                         )
                     });
-                    if !report.deleted.is_empty()
-                        && let Some(tab) = self.tabs.get_mut(self.active_tab)
-                    {
-                        tab.volume_usage = volume::query(&tab.root_path);
-                        tab.pending_rescan = true;
-                        tab.last_watch_event = Some(Instant::now());
-                    }
                 }
                 Err(error) => self.toast = Some(error),
             }
         }
         let mut restart = Vec::new();
         for (tab_index, tab) in self.tabs.iter_mut().enumerate() {
+            if tab
+                .watch_suppression
+                .as_ref()
+                .is_some_and(|suppression| Instant::now() > suppression.until)
+            {
+                tab.watch_suppression = None;
+            }
             while let Ok(signal) = tab.watcher_events.try_recv() {
+                if let WatchSignal::Changed { paths, .. } = &signal
+                    && tab
+                        .watch_suppression
+                        .as_ref()
+                        .is_some_and(|suppression| suppression.suppresses(paths))
+                {
+                    continue;
+                }
                 tab.pending_rescan = true;
                 tab.last_watch_event = Some(Instant::now());
                 if let WatchSignal::Invalidated { reason, .. } = signal {
@@ -580,18 +732,14 @@ impl VoidspaceApp {
                     tab.scanning = false;
                 }
             }
+            if !dirty.is_empty() {
+                tab.publish_index_snapshot();
+            }
             if tab.pending_navigation.is_some() && !tab.scanning {
                 tab.snapshot = tab.index.snapshot();
                 if let Some(bookmark) = tab.pending_navigation.take() {
                     tab.treemap_state = bookmark.restore(&tab.snapshot);
                 }
-            } else if !dirty.is_empty() && tab.pending_navigation.is_none() {
-                tab.snapshot = tab.index.snapshot();
-                let snapshot = &tab.snapshot;
-                tab.treemap_state.repair(
-                    |id| snapshot.node(id).is_some(),
-                    |id| snapshot.node(id).and_then(|node| node.parent),
-                );
             }
             if tab.scanning || !dirty.is_empty() {
                 context.request_repaint_after(Duration::from_millis(16));
@@ -633,6 +781,10 @@ impl VoidspaceApp {
         let navigation = TreemapBookmark::capture(&tab.snapshot, &tab.treemap_state);
         tab.index = Index::new(restarting_scan_id, tab.generation, root.identity, root.name);
         tab.pending_navigation = Some(navigation);
+        tab.snapshot = tab.index.snapshot();
+        tab.treemap_state = TreemapState::new(tab.snapshot.root);
+        tab.local_event_sequence = 0;
+        tab.watch_suppression = None;
         tab.volume_usage = volume::query(&tab.root_path);
         let (event_tx, event_rx) = bounded(65_536);
         tab.events = event_rx;
@@ -2832,11 +2984,15 @@ mod status_bar_tests {
 
 #[cfg(test)]
 mod tactical_arc_frame_routing_tests {
-    use std::sync::Arc;
+    use std::{path::Path, sync::Arc};
 
+    use crossbeam_channel::Sender;
     use eframe::App as _;
     use voidspace_index::{IndexSnapshot, NodeSnapshot};
-    use voidspace_model::{FileIdentity, NodeFlags, NodeKind, ScanId, VolumeId, WinName};
+    use voidspace_model::{
+        EventEnvelope, EventPayload, FileIdentity, MODEL_SCHEMA_VERSION, NodeFlags, NodeKind,
+        ProducerId, ScanId, SizeMetrics, SourceRevision, UpsertNode, VolumeId, WinName,
+    };
 
     use super::*;
 
@@ -2901,6 +3057,8 @@ mod tactical_arc_frame_routing_tests {
             treemap_state,
             pending_rescan: false,
             last_watch_event: None,
+            local_event_sequence: 0,
+            watch_suppression: None,
             errors: Vec::new(),
             volume_usage: None,
             pending_navigation: None,
@@ -2978,6 +3136,81 @@ mod tactical_arc_frame_routing_tests {
         output.textures_delta.clear();
     }
 
+    fn scan_event(sequence: u64, payload: EventPayload) -> EventEnvelope {
+        EventEnvelope {
+            schema_version: MODEL_SCHEMA_VERSION,
+            scan_id: ScanId(1),
+            generation: 1,
+            branch_epoch: None,
+            producer: ProducerId(1),
+            sequence,
+            observed_at_qpc: sequence,
+            cause_operation: None,
+            payload,
+        }
+    }
+
+    fn install_indexed_folder(
+        app: &mut VoidspaceApp,
+        root_path: &Path,
+    ) -> (NodeId, PathBuf, Sender<WatchSignal>) {
+        let root_identity = FileIdentity::stable(VolumeId::local_for_test(10), 10, 1);
+        let folder_identity = FileIdentity::stable(VolumeId::local_for_test(10), 11, 1);
+        let file_identity = FileIdentity::stable(VolumeId::local_for_test(10), 12, 1);
+        let mut index = Index::new(ScanId(1), 1, root_identity.clone(), WinName::from("root"));
+        index
+            .apply(scan_event(
+                1,
+                EventPayload::UpsertNode(UpsertNode::simple(
+                    root_identity,
+                    folder_identity.clone(),
+                    WinName::from("victim"),
+                    NodeKind::Directory,
+                    SizeMetrics::new(0, 0),
+                    SourceRevision::new(ProducerId(1), 1, 1),
+                )),
+            ))
+            .unwrap();
+        index
+            .apply(scan_event(
+                2,
+                EventPayload::UpsertNode(UpsertNode::simple(
+                    folder_identity,
+                    file_identity,
+                    WinName::from("payload.bin"),
+                    NodeKind::File,
+                    SizeMetrics::new(100, 4_096),
+                    SourceRevision::new(ProducerId(1), 1, 2),
+                )),
+            ))
+            .unwrap();
+        let folder_id = index
+            .find_child(index.root(), &WinName::from("victim"))
+            .expect("folder is indexed");
+        let snapshot = index.snapshot();
+        let (watch_tx, watch_rx) = bounded(8);
+        let tab = &mut app.tabs[0];
+        tab.root_path = root_path.to_path_buf();
+        tab.generation = 1;
+        tab.index = index;
+        tab.snapshot = snapshot.clone();
+        tab.layout = empty_layout(snapshot.root);
+        tab.events = bounded(1).1;
+        tab.watcher_events = watch_rx;
+        tab.scan = None;
+        tab.watcher = None;
+        tab.scanning = false;
+        tab.paused = false;
+        tab.files_seen = 2;
+        tab.treemap_state = TreemapState::new(snapshot.root);
+        tab.pending_rescan = false;
+        tab.last_watch_event = None;
+        tab.pending_navigation = None;
+        app.tactical_arc = None;
+        app.overlays.dismiss_transient();
+        (folder_id, root_path.join("victim"), watch_tx)
+    }
+
     #[test]
     fn active_arc_resolves_tab_before_underlay_and_defers_dismiss_until_after_underlay() {
         let context = egui::Context::default();
@@ -3039,5 +3272,123 @@ mod tactical_arc_frame_routing_tests {
             "the pending outside-click dismissal must not re-enable the underlay"
         );
         assert_eq!(app.overlays.transient(), None);
+    }
+
+    #[test]
+    fn manual_rescan_exposes_the_new_generation_immediately() {
+        let context = egui::Context::default();
+        let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 720.0));
+        let sandbox = tempfile::tempdir().unwrap();
+        std::fs::create_dir(sandbox.path().join("victim")).unwrap();
+        let mut app = app_with_open_keyboard_arc(&context, viewport);
+        install_indexed_folder(&mut app, sandbox.path());
+
+        app.restart_tab(0);
+
+        assert_eq!(app.tabs[0].snapshot.generation, 2);
+        assert_eq!(app.tabs[0].snapshot.nodes.len(), 1);
+        assert!(app.tabs[0].scanning);
+    }
+
+    #[test]
+    fn manual_rescan_publishes_partial_results_before_baseline_finishes() {
+        let context = egui::Context::default();
+        let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 720.0));
+        let sandbox = tempfile::tempdir().unwrap();
+        let mut app = app_with_open_keyboard_arc(&context, viewport);
+        install_indexed_folder(&mut app, sandbox.path());
+        let bookmark = TreemapBookmark::capture(&app.tabs[0].snapshot, &app.tabs[0].treemap_state);
+        let root_identity = FileIdentity::stable(VolumeId::local_for_test(20), 20, 1);
+        let child_identity = FileIdentity::stable(VolumeId::local_for_test(20), 21, 1);
+        let replacement = Index::new(ScanId(1), 1, root_identity.clone(), WinName::from("root"));
+        let root = replacement.root();
+        let (event_tx, event_rx) = bounded(4);
+        event_tx
+            .send(scan_event(
+                1,
+                EventPayload::UpsertNode(UpsertNode::simple(
+                    root_identity,
+                    child_identity,
+                    WinName::from("partial"),
+                    NodeKind::Directory,
+                    SizeMetrics::new(0, 0),
+                    SourceRevision::new(ProducerId(1), 1, 1),
+                )),
+            ))
+            .unwrap();
+        let tab = &mut app.tabs[0];
+        tab.index = replacement;
+        tab.snapshot = tab.index.snapshot();
+        tab.treemap_state = TreemapState::new(root);
+        tab.events = event_rx;
+        tab.scanning = true;
+        tab.pending_navigation = Some(bookmark);
+
+        app.update_workers(&context);
+
+        assert!(
+            app.tabs[0]
+                .snapshot
+                .nodes
+                .iter()
+                .any(|node| node.name == WinName::from("partial"))
+        );
+        assert!(app.tabs[0].scanning);
+    }
+
+    #[test]
+    fn successful_folder_delete_updates_the_index_without_a_full_rescan() {
+        let context = egui::Context::default();
+        let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 720.0));
+        let sandbox = tempfile::tempdir().unwrap();
+        let mut app = app_with_open_keyboard_arc(&context, viewport);
+        let (folder_id, victim, _) = install_indexed_folder(&mut app, sandbox.path());
+        app.fileop_running = true;
+        app.fileop_tx
+            .send(Ok(OperationReport {
+                deleted: vec![victim],
+                ..OperationReport::default()
+            }))
+            .unwrap();
+
+        app.update_workers(&context);
+
+        assert!(app.tabs[0].snapshot.node(folder_id).is_none());
+        assert_eq!(
+            app.tabs[0]
+                .snapshot
+                .node(app.tabs[0].snapshot.root)
+                .unwrap()
+                .allocated,
+            0
+        );
+        assert!(!app.tabs[0].pending_rescan);
+    }
+
+    #[test]
+    fn watcher_echo_for_our_delete_does_not_schedule_a_second_full_rescan() {
+        let context = egui::Context::default();
+        let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 720.0));
+        let sandbox = tempfile::tempdir().unwrap();
+        let mut app = app_with_open_keyboard_arc(&context, viewport);
+        let (_, victim, watch_tx) = install_indexed_folder(&mut app, sandbox.path());
+        app.fileop_running = true;
+        app.fileop_tx
+            .send(Ok(OperationReport {
+                deleted: vec![victim.clone()],
+                ..OperationReport::default()
+            }))
+            .unwrap();
+        app.update_workers(&context);
+        watch_tx
+            .send(WatchSignal::Changed {
+                sequence: 1,
+                paths: vec![victim],
+            })
+            .unwrap();
+
+        app.update_workers(&context);
+
+        assert!(!app.tabs[0].pending_rescan);
     }
 }
